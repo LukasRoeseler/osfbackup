@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OSF Backupper</title>
+<meta name="description" content="List and download all public OSF projects and components for an account, structured by project.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230d78c9' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 8l-9-5-9 5 9 5 9-5z'/%3E%3Cpath d='M3 8v8l9 5 9-5V8'/%3E%3Cpath d='M12 13v8'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0f1620; --panel:#161f2c; --panel2:#1c2734; --border:#2a3846;
+    --text:#e7edf3; --muted:#8fa3b8; --accent:#4fb0ff; --accent2:#2f8fe0;
+    --good:#4fd18b; --warn:#f5b942; --bad:#ff6b6b; --mono:ui-monospace,Consolas,monospace;
+    --tri-grey:#3a4756; --tri-blue:#2f8fe0;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f4f7fa; --panel:#ffffff; --panel2:#eef2f6; --border:#dbe3ea;
+      --text:#1a2430; --muted:#5b6b7a; --accent:#0d78c9; --accent2:#0d78c9;
+      --good:#1a9c5b; --warn:#a06a00; --bad:#c62828;
+      --tri-grey:#cfd8e0; --tri-blue:#0d78c9;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.45;
+  }
+  .wrap{max-width:920px; margin:0 auto; padding:28px 18px 80px;}
+  .icn{display:inline-flex; width:16px; height:16px; flex:none;}
+  .icn svg{width:100%; height:100%;}
+  .hero{position:relative; overflow:hidden; border-radius:12px; background:var(--panel); border:1px solid var(--border);
+    padding:26px 24px; margin-bottom:18px;}
+  .hero-content{position:relative; z-index:2;}
+  .hero h1{margin:0; font-size:1.7rem;}
+  .hero-blue, .hero-grey{position:absolute; right:-6px; bottom:-6px; width:220px; height:150px;
+    clip-path:polygon(100% 0, 100% 100%, 0 100%); z-index:0;}
+  .hero-blue{background:var(--tri-blue); width:230px; height:158px;}
+  .hero-grey{background:var(--tri-grey); z-index:1;}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px 20px; margin-bottom:18px;}
+  .field{display:flex; flex-direction:column; gap:4px; margin-bottom:14px;}
+  .field label{font-size:0.85rem; font-weight:600; color:var(--text);}
+  .search-row{display:flex; gap:8px; flex-wrap:wrap;}
+  input[type=text], input[type=password]{
+    flex:1; min-width:220px; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:10px 12px; font-size:0.98rem;
+  }
+  button{
+    display:inline-flex; align-items:center; gap:7px; background:var(--accent2); color:#fff; border:none;
+    border-radius:8px; padding:10px 16px; font-size:0.95rem; cursor:pointer; font-weight:600;
+  }
+  button:hover{filter:brightness(1.08);}
+  button:disabled{opacity:.5; cursor:default;}
+  button.ghost{background:transparent; color:var(--accent); border:1px solid var(--border); font-weight:500;}
+  button.small{padding:6px 10px; font-size:0.85rem; font-weight:500;}
+  .hint{font-size:0.8rem; color:var(--muted);}
+  .hint a{color:var(--accent);}
+  #status{min-height:1.4em; font-size:0.92rem; margin-top:12px;}
+  #status.info{color:var(--muted);}
+  #status.err{color:var(--bad);}
+  #status.ok{color:var(--good);}
+  .spinner{display:inline-block; width:.9em; height:.9em; border:2px solid var(--muted); border-top-color:var(--accent);
+    border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:-2px; margin-right:6px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #results{display:flex; flex-direction:column; gap:14px;}
+  .toolbar{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;}
+  .toolbar .left{display:flex; align-items:center; gap:10px; color:var(--muted); font-size:0.9rem;}
+  .node{border:1px solid var(--border); border-radius:10px; background:var(--panel);}
+  .node > .row{display:flex; align-items:flex-start; gap:10px; padding:12px 14px;}
+  .node .children{padding:0 0 10px 30px; display:flex; flex-direction:column; gap:8px;}
+  .node .children .node{background:var(--panel2);}
+  .node input[type=checkbox]{margin-top:4px; width:16px; height:16px; accent-color:var(--accent);}
+  .node .meta{flex:1; min-width:0;}
+  .node .title-line{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;}
+  .node .title-line a{color:var(--text); font-weight:600; text-decoration:none;}
+  .node .title-line a:hover{color:var(--accent);}
+  .badge{display:inline-block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.03em;
+    color:var(--muted); background:var(--panel2); border:1px solid var(--border); border-radius:5px; padding:1px 6px;}
+  .node .sub{font-size:0.82rem; color:var(--muted); margin-top:2px;}
+  .node .desc{font-size:0.85rem; color:var(--muted); margin-top:6px; max-width:640px;}
+  .node .actions{margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
+  .node .actions a.zipbtn{
+    display:inline-flex; align-items:center; gap:7px; background:var(--accent2); color:#fff;
+    text-decoration:none; border-radius:8px; padding:7px 12px; font-size:0.85rem; font-weight:600;
+  }
+  .node .actions a.zipbtn:hover{filter:brightness(1.08);}
+  .filelist{margin-top:8px; font-size:0.83rem; max-height:220px; overflow:auto; border:1px solid var(--border);
+    border-radius:6px; background:var(--panel2); padding:6px 10px;}
+  .filelist a{color:var(--accent); text-decoration:none; display:block; padding:2px 0; word-break:break-all;}
+  .filelist a:hover{text-decoration:underline;}
+  .filelist .fpath{color:var(--muted);}
+  .wikis{margin-top:8px; display:flex; flex-wrap:wrap; gap:6px;}
+  .foot{margin-top:36px; color:var(--muted); font-size:0.82rem; text-align:center;}
+  .foot a{color:var(--accent);}
+  code{font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:0.85em;}
+  .empty{color:var(--muted); font-size:0.9rem; padding:8px 2px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-blue"></div>
+    <div class="hero-grey"></div>
+    <div class="hero-content"><h1>OSF Backupper</h1></div>
+  </header>
+
+  <section class="card">
+    <div class="field">
+      <label for="tokenInput">OSF access token (required)</label>
+      <input type="password" id="tokenInput" placeholder="Paste your OSF personal access token" autocomplete="off" />
+      <div class="hint">
+        <a href="https://osf.io/settings/tokens/" target="_blank" rel="noopener">Create a token</a>
+        (read scope is enough). OSF only allows this kind of request from other websites when a token is attached,
+        and it raises your limit from 100 to 10,000 requests a day.
+      </div>
+    </div>
+
+    <form id="searchForm" class="search-row" autocomplete="off">
+      <input type="text" id="accountInput" placeholder="Enter OSF id or profile link" />
+      <button type="submit" id="findBtn"><span class="icn" data-icon="search"></span>Find projects</button>
+    </form>
+
+    <div id="status"></div>
+  </section>
+
+  <section id="results"></section>
+
+  <div class="foot">
+    <a href="https://github.com/LukasRoeseler/osfbackup" target="_blank" rel="noopener">Source on GitHub</a>.
+    Not affiliated with the Center for Open Science.
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const API = "https://api.osf.io/v2";
+  const FILES = "https://files.osf.io/v1";
+  const LS_KEY = "osfbackupper.token.v2";
+
+  const ICONS = {
+    search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+    download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>',
+    folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path></svg>',
+    document: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><path d="M14 2v6h6"></path><line x1="8" y1="13" x2="16" y2="13"></line><line x1="8" y1="17" x2="16" y2="17"></line></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><line x1="12" y1="11" x2="12" y2="16"></line><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"></circle></svg>',
+    list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>',
+  };
+  function iconHtml(name) { return `<span class="icn">${ICONS[name] || ""}</span>`; }
+  function applyIconPlaceholders(root) {
+    root.querySelectorAll("[data-icon]").forEach(n => { n.innerHTML = ICONS[n.getAttribute("data-icon")] || ""; });
+  }
+
+  const el = (id) => document.getElementById(id);
+  const statusEl = el("status");
+  const resultsEl = el("results");
+
+  applyIconPlaceholders(document);
+
+  // ---------- token persistence ----------
+  try {
+    const saved = localStorage.getItem(LS_KEY);
+    if (saved) el("tokenInput").value = saved;
+  } catch (e) { /* ignore corrupt storage */ }
+  el("tokenInput").addEventListener("change", () => {
+    try { localStorage.setItem(LS_KEY, el("tokenInput").value.trim()); } catch (e) { /* ignore */ }
+  });
+
+  function authHeaders() {
+    const token = el("tokenInput").value.trim();
+    return token ? { Authorization: "Bearer " + token } : {};
+  }
+
+  // ---------- status / progress ----------
+  function setStatus(msg, kind) {
+    statusEl.className = kind || "info";
+    statusEl.innerHTML = msg;
+  }
+  function setBusy(msg) { setStatus(`<span class="spinner"></span>${msg}`, "info"); }
+
+  // ---------- rate-limit aware fetch ----------
+  let callCount = 0;
+  async function apiRequest(rawUrl, attempt = 0) {
+    callCount++;
+    let res;
+    try {
+      res = await fetch(rawUrl, { headers: authHeaders() });
+    } catch (e) {
+      throw new Error(`Could not reach the OSF API (${e.message}).`);
+    }
+    if (res.status === 429) {
+      if (attempt >= 3) throw new Error("OSF API rate limit reached and retries exhausted. Wait a while and try again.");
+      const wait = 15 * Math.pow(2, attempt); // 15s, 30s, 60s
+      setBusy(`Rate limited by the OSF API. Waiting ${wait}s before retrying&hellip;`);
+      await new Promise(r => setTimeout(r, wait * 1000));
+      return apiRequest(rawUrl, attempt + 1);
+    }
+    let body;
+    try { body = await res.json(); } catch (e) { body = null; }
+    if (!res.ok) {
+      const detail = body && body.errors && body.errors[0] && body.errors[0].detail;
+      throw new Error(`OSF API error ${res.status}${detail ? ": " + detail : ""}.`);
+    }
+    return body;
+  }
+
+  async function apiRequestAllPages(rawUrl) {
+    let all = [];
+    let next = rawUrl;
+    let guard = 0;
+    while (next && guard < 200) {
+      const body = await apiRequest(next);
+      all = all.concat(body.data || []);
+      next = body.links && body.links.next;
+      guard++;
+    }
+    return all;
+  }
+
+  // ---------- input parsing ----------
+  function parseAccountInput(raw) {
+    let s = raw.trim();
+    s = s.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+    s = s.replace(/^osf\.io\//i, "");
+    s = s.split(/[/?#]/)[0];
+    s = s.trim();
+    if (!/^[a-z0-9]{3,12}$/i.test(s)) return null;
+    return s;
+  }
+
+  // ---------- name sanitizing for downloads ----------
+  function sanitizePart(s) {
+    return (s || "untitled").replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 80);
+  }
+
+  // ---------- tree building ----------
+  function contributorsFromEmbed(nodeJson) {
+    try {
+      return nodeJson.embeds.contributors.data
+        .map(c => c.embeds && c.embeds.users && c.embeds.users.data && c.embeds.users.data.attributes && c.embeds.users.data.attributes.full_name)
+        .filter(Boolean);
+    } catch (e) { return []; }
+  }
+
+  function toNodeRecord(d) {
+    return {
+      id: d.id,
+      title: d.attributes.title || "(untitled)",
+      description: d.attributes.description || "",
+      category: d.attributes.category || "project",
+      dateCreated: d.attributes.date_created,
+      contributors: contributorsFromEmbed(d),
+      childrenLink: d.relationships.children && d.relationships.children.links.related.href,
+      filesLink: d.relationships.files && d.relationships.files.links.related.href,
+      wikisLink: d.relationships.wikis && d.relationships.wikis.links.related.href,
+      children: [],
+      prepared: false,
+      providers: [],
+      wikis: [],
+    };
+  }
+
+  async function fetchChildrenRecursive(node, depth) {
+    if (depth > 6 || !node.childrenLink) return;
+    const kids = await apiRequestAllPages(node.childrenLink + (node.childrenLink.includes("?") ? "&" : "?") + "embed=contributors&page[size]=100");
+    for (const k of kids) {
+      const rec = toNodeRecord(k);
+      node.children.push(rec);
+      setBusy(`Mapping project structure&hellip; (${callCount} API calls so far)`);
+      await fetchChildrenRecursive(rec, depth + 1);
+    }
+  }
+
+  async function buildTree(accountId) {
+    setBusy(`Looking up <code>${accountId}</code>&hellip;`);
+    let userJson = null;
+    try {
+      userJson = await apiRequest(`${API}/users/${accountId}/`);
+    } catch (e) {
+      userJson = null;
+    }
+
+    if (userJson && userJson.data) {
+      const user = userJson.data;
+      setBusy(`Found ${user.attributes.full_name || accountId}. Listing public projects&hellip;`);
+      const nodes = await apiRequestAllPages(`${API}/users/${accountId}/nodes/?embed=contributors&page[size]=100`);
+      const topLevel = nodes.filter(n => !n.relationships.parent);
+      const tree = [];
+      for (const n of topLevel) {
+        const rec = toNodeRecord(n);
+        tree.push(rec);
+        setBusy(`Mapping project structure&hellip; (${callCount} API calls so far)`);
+        await fetchChildrenRecursive(rec, 1);
+      }
+      return { kind: "user", label: user.attributes.full_name || accountId, tree };
+    }
+
+    // fallback: treat the input as a single node/project GUID
+    setBusy(`No account found for <code>${accountId}</code>. Trying it as a project link&hellip;`);
+    let nodeJson;
+    try {
+      nodeJson = await apiRequest(`${API}/nodes/${accountId}/?embed=contributors`);
+    } catch (e) {
+      throw new Error(`"${accountId}" is not a public OSF account or project, or your token cannot see it. Check the id or link.`);
+    }
+    const rec = toNodeRecord(nodeJson.data);
+    await fetchChildrenRecursive(rec, 1);
+    return { kind: "node", label: rec.title, tree: [rec] };
+  }
+
+  // ---------- lazy per-node download prep ----------
+  async function prepareDownloads(node, rootTitle) {
+    if (node.prepared) return;
+    node.prepared = true;
+    try {
+      if (node.filesLink) {
+        const providers = await apiRequestAllPages(node.filesLink);
+        node.providers = providers.map(p => ({
+          name: p.attributes.name,
+          filesLink: p.relationships.files && p.relationships.files.links.related.href,
+        }));
+      }
+    } catch (e) { node.providers = []; node.providersError = e.message; }
+    try {
+      if (node.wikisLink) {
+        const wikis = await apiRequestAllPages(node.wikisLink);
+        node.wikis = wikis.map(w => ({ name: w.attributes.name, downloadLink: w.links && w.links.download }));
+      }
+    } catch (e) { node.wikis = []; node.wikisError = e.message; }
+  }
+
+  async function listFilesRecursive(filesLink, pathPrefix, out, guard) {
+    guard.n = (guard.n || 0) + 1;
+    if (guard.n > 60) return; // safety cap on API calls for the fallback listing
+    const entries = await apiRequestAllPages(filesLink);
+    for (const f of entries) {
+      const name = f.attributes.name;
+      if (f.attributes.kind === "folder") {
+        const sub = f.relationships.files && f.relationships.files.links.related.href;
+        if (sub) await listFilesRecursive(sub, pathPrefix + name + "/", out, guard);
+      } else {
+        out.push({ path: pathPrefix + name, download: f.links && f.links.download, size: f.attributes.size });
+      }
+    }
+  }
+
+  function humanSize(bytes) {
+    if (bytes == null) return "";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, n = bytes;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + units[i];
+  }
+
+  function downloadBlob(filename, text, type) {
+    const blob = new Blob([text], { type: type || "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+  }
+
+  // ---------- rendering ----------
+  const allNodeRefs = []; // {node, rootTitle} for "download selected"
+
+  function renderTree(root) {
+    resultsEl.innerHTML = "";
+    allNodeRefs.length = 0;
+    if (!root.tree.length) {
+      resultsEl.innerHTML = `<div class="card empty">No public projects found for this account.</div>`;
+      return;
+    }
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "card toolbar";
+    toolbar.innerHTML = `
+      <div class="left"><strong>${escapeHtml(root.label)}</strong> &middot; ${root.tree.length} top-level ${root.tree.length === 1 ? "project" : "projects"}</div>
+      <div>
+        <button id="selectAllBtn" class="ghost small">Select all</button>
+        <button id="downloadSelectedBtn" class="small">${iconHtml("download")}Download selected</button>
+      </div>`;
+    resultsEl.appendChild(toolbar);
+
+    const list = document.createElement("div");
+    list.style.display = "flex";
+    list.style.flexDirection = "column";
+    list.style.gap = "10px";
+    root.tree.forEach(node => list.appendChild(renderNode(node, root.label)));
+    resultsEl.appendChild(list);
+
+    el("selectAllBtn").addEventListener("click", () => {
+      resultsEl.querySelectorAll('input[type=checkbox][data-select]').forEach(cb => cb.checked = true);
+    });
+    el("downloadSelectedBtn").addEventListener("click", downloadSelected);
+  }
+
+  function renderNode(node, rootTitle) {
+    const wrap = document.createElement("div");
+    wrap.className = "node";
+
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.setAttribute("data-select", "1");
+    row.appendChild(cb);
+    allNodeRefs.push({ node, rootTitle, checkbox: cb });
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const contrib = node.contributors.length ? node.contributors.join(", ") : "";
+    meta.innerHTML = `
+      <div class="title-line">
+        <a href="https://osf.io/${node.id}/" target="_blank" rel="noopener">${escapeHtml(node.title)}</a>
+        <span class="badge">${escapeHtml(node.category)}</span>
+      </div>
+      <div class="sub">${contrib ? escapeHtml(contrib) : ""}${node.dateCreated ? (contrib ? " &middot; " : "") + new Date(node.dateCreated).getFullYear() : ""}</div>
+      ${node.description ? `<div class="desc">${escapeHtml(node.description)}</div>` : ""}
+    `;
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const prepBtn = document.createElement("button");
+    prepBtn.className = "ghost small";
+    prepBtn.innerHTML = `${iconHtml("folder")}Get download links`;
+    const actionsHolder = document.createElement("div");
+    actions.appendChild(prepBtn);
+    actions.appendChild(actionsHolder);
+
+    prepBtn.addEventListener("click", async () => {
+      prepBtn.disabled = true;
+      prepBtn.innerHTML = "Loading&hellip;";
+      try {
+        await prepareDownloads(node, rootTitle);
+        renderDownloadOptions(node, rootTitle, actionsHolder);
+        prepBtn.remove();
+      } catch (e) {
+        prepBtn.disabled = false;
+        prepBtn.innerHTML = `${iconHtml("folder")}Get download links`;
+        setStatus("Error preparing downloads: " + escapeHtml(e.message), "err");
+      }
+    });
+
+    meta.appendChild(actions);
+    row.appendChild(meta);
+    wrap.appendChild(row);
+
+    if (node.children.length) {
+      const kidsWrap = document.createElement("div");
+      kidsWrap.className = "children";
+      node.children.forEach(k => kidsWrap.appendChild(renderNode(k, rootTitle)));
+      wrap.appendChild(kidsWrap);
+    }
+    return wrap;
+  }
+
+  function renderDownloadOptions(node, rootTitle, holder) {
+    holder.innerHTML = "";
+    const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
+
+    if (node.providers && node.providers.length) {
+      node.providers.forEach(p => {
+        const a = document.createElement("a");
+        a.className = "zipbtn";
+        a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
+        a.download = `OSF-Backup/${folder} [${p.name}].zip`;
+        a.innerHTML = `${iconHtml("download")}Download ${escapeHtml(p.name)} as zip`;
+        a.target = "_blank";
+        a.rel = "noopener";
+        holder.appendChild(a);
+      });
+    } else {
+      const none = document.createElement("span");
+      none.className = "hint";
+      none.textContent = "No file storage found on this node.";
+      holder.appendChild(none);
+    }
+
+    const fallbackBtn = document.createElement("button");
+    fallbackBtn.className = "ghost small";
+    fallbackBtn.innerHTML = `${iconHtml("list")}List individual file links`;
+    holder.appendChild(fallbackBtn);
+    fallbackBtn.addEventListener("click", async () => {
+      fallbackBtn.disabled = true;
+      fallbackBtn.innerHTML = "Listing files&hellip;";
+      const box = document.createElement("div");
+      box.className = "filelist";
+      holder.appendChild(box);
+      try {
+        for (const p of node.providers) {
+          const out = [];
+          await listFilesRecursive(p.filesLink, "", out, {});
+          out.forEach(f => {
+            const a = document.createElement("a");
+            a.href = f.download;
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.download = `${folder}/${f.path}`;
+            a.innerHTML = `${escapeHtml(f.path)} <span class="fpath">${humanSize(f.size)}</span>`;
+            box.appendChild(a);
+          });
+          if (!out.length) box.innerHTML += `<div class="hint">No files under ${escapeHtml(p.name)}.</div>`;
+        }
+        fallbackBtn.remove();
+      } catch (e) {
+        box.innerHTML = `<div class="hint">Could not list files: ${escapeHtml(e.message)}</div>`;
+        fallbackBtn.disabled = false;
+        fallbackBtn.innerHTML = `${iconHtml("list")}Retry listing individual files`;
+      }
+    });
+
+    if (node.wikis && node.wikis.length) {
+      const wikiWrap = document.createElement("div");
+      wikiWrap.className = "wikis";
+      node.wikis.forEach(w => {
+        const btn = document.createElement("button");
+        btn.className = "ghost small";
+        btn.innerHTML = `${iconHtml("document")}${escapeHtml(w.name)}.md`;
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          btn.innerHTML = "Fetching&hellip;";
+          try {
+            const res = await fetch(w.downloadLink, { headers: authHeaders() });
+            const text = await res.text();
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            downloadBlob(`${folder}/wiki/${sanitizePart(w.name)}.md`, text, "text/markdown");
+            btn.innerHTML = `${iconHtml("document")}${escapeHtml(w.name)}.md (done)`;
+          } catch (e) {
+            btn.innerHTML = `${iconHtml("document")}${escapeHtml(w.name)}.md (failed, click to retry)`;
+          }
+          btn.disabled = false;
+        });
+        wikiWrap.appendChild(btn);
+      });
+      holder.appendChild(wikiWrap);
+    }
+
+    const manifestBtn = document.createElement("button");
+    manifestBtn.className = "ghost small";
+    manifestBtn.innerHTML = `${iconHtml("info")}Download info (manifest.json)`;
+    manifestBtn.addEventListener("click", () => {
+      const manifest = {
+        title: node.title,
+        osf_url: `https://osf.io/${node.id}/`,
+        category: node.category,
+        description: node.description,
+        contributors: node.contributors,
+        date_created: node.dateCreated,
+        wikis: node.wikis.map(w => w.name),
+        components: node.children.map(c => c.title),
+      };
+      downloadBlob(`${folder}/manifest.json`, JSON.stringify(manifest, null, 2), "application/json");
+    });
+    holder.appendChild(manifestBtn);
+  }
+
+  async function downloadSelected() {
+    const chosen = allNodeRefs.filter(r => r.checkbox.checked);
+    if (!chosen.length) { setStatus("Nothing selected.", "err"); return; }
+    setBusy(`Preparing ${chosen.length} selected item(s)&hellip;`);
+    let i = 0;
+    for (const { node, rootTitle } of chosen) {
+      i++;
+      setBusy(`Preparing downloads (${i}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
+      try {
+        await prepareDownloads(node, rootTitle);
+      } catch (e) { continue; }
+      const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
+      for (const p of node.providers) {
+        const a = document.createElement("a");
+        a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
+        a.download = `OSF-Backup/${folder} [${p.name}].zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        await new Promise(r => setTimeout(r, 1200));
+      }
+    }
+    setStatus(`Started downloads for ${chosen.length} item(s). Allow multiple downloads if your browser asks.`, "ok");
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // ---------- form handling ----------
+  el("searchForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const token = el("tokenInput").value.trim();
+    if (!token) {
+      setStatus("An OSF access token is required. See the field above.", "err");
+      return;
+    }
+    const raw = el("accountInput").value;
+    const accountId = parseAccountInput(raw);
+    if (!accountId) {
+      setStatus("Could not parse that as an OSF id or link. Try a bare id like <code>tqx69</code>, or a full profile link.", "err");
+      return;
+    }
+    el("findBtn").disabled = true;
+    resultsEl.innerHTML = "";
+    callCount = 0;
+    try {
+      const root = await buildTree(accountId);
+      setStatus(`Done. ${callCount} OSF API calls used this run.`, "ok");
+      renderTree(root);
+    } catch (e) {
+      setStatus(escapeHtml(e.message), "err");
+    } finally {
+      el("findBtn").disabled = false;
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
