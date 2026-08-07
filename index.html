@@ -29,10 +29,9 @@
   .wrap{max-width:920px; margin:0 auto; padding:28px 18px 80px;}
   .icn{display:inline-flex; width:16px; height:16px; flex:none;}
   .icn svg{width:100%; height:100%;}
-  .hero{position:relative; overflow:hidden; border-radius:12px; background:var(--panel); border:1px solid var(--border);
-    padding:26px 24px; margin-bottom:18px;}
+  .hero{position:relative; overflow:hidden;}
   .hero-content{position:relative; z-index:2;}
-  .hero h1{margin:0; font-size:1.7rem;}
+  .hero h1{margin:0 0 16px; font-size:1.7rem;}
   .hero-blue, .hero-grey{position:absolute; right:-6px; bottom:-6px; width:220px; height:150px;
     clip-path:polygon(100% 0, 100% 100%, 0 100%); z-index:0;}
   .hero-blue{background:var(--tri-blue); width:230px; height:158px;}
@@ -99,35 +98,35 @@
 <body>
 <div class="wrap">
 
-  <header class="hero">
+  <section class="card hero">
     <div class="hero-blue"></div>
     <div class="hero-grey"></div>
-    <div class="hero-content"><h1>OSF Backupper</h1></div>
-  </header>
+    <div class="hero-content">
+      <h1>OSF Backupper</h1>
 
-  <section class="card">
-    <div class="field">
-      <label for="tokenInput">OSF access token (required)</label>
-      <input type="password" id="tokenInput" placeholder="Paste your OSF personal access token" autocomplete="off" />
-      <div class="hint">
-        <a href="https://osf.io/settings/tokens/" target="_blank" rel="noopener">Create a token</a>
-        (read scope is enough). OSF only allows this kind of request from other websites when a token is attached,
-        and it raises your limit from 100 to 10,000 requests a day.
+      <div class="field">
+        <label for="tokenInput">OSF access token (optional)</label>
+        <input type="password" id="tokenInput" placeholder="Paste an OSF personal access token" autocomplete="off" />
+        <div class="hint">
+          Works without one. A <a href="https://osf.io/settings/tokens/" target="_blank" rel="noopener">token</a>
+          (read scope is enough) raises your limit from 100 to 10,000 requests a day and skips the CORS proxy below.
+        </div>
       </div>
+
+      <form id="searchForm" class="search-row" autocomplete="off">
+        <input type="text" id="accountInput" placeholder="Enter OSF id or profile link" />
+        <button type="submit" id="findBtn"><span class="icn" data-icon="search"></span>Find projects</button>
+      </form>
+
+      <div id="status"></div>
     </div>
-
-    <form id="searchForm" class="search-row" autocomplete="off">
-      <input type="text" id="accountInput" placeholder="Enter OSF id or profile link" />
-      <button type="submit" id="findBtn"><span class="icn" data-icon="search"></span>Find projects</button>
-    </form>
-
-    <div id="status"></div>
   </section>
 
   <section id="results"></section>
 
   <div class="foot">
     <a href="https://github.com/LukasRoeseler/osfbackup" target="_blank" rel="noopener">Source on GitHub</a>.
+    <a href="https://github.com/LukasRoeseler/osfbackup/blob/main/README.md" target="_blank" rel="noopener">Readme</a>.
     Not affiliated with the Center for Open Science.
   </div>
 </div>
@@ -138,6 +137,7 @@
 
   const API = "https://api.osf.io/v2";
   const FILES = "https://files.osf.io/v1";
+  const DEFAULT_PROXY = "https://proxy.cors.sh/";
   const LS_KEY = "osfbackupper.token.v2";
 
   const ICONS = {
@@ -173,6 +173,13 @@
     return token ? { Authorization: "Bearer " + token } : {};
   }
 
+  // A request carrying an Authorization header gets CORS-allowed by OSF from any origin,
+  // so a token skips the proxy entirely. Without one, OSF only allows osf.io itself, so
+  // anonymous requests are relayed through a public CORS proxy instead.
+  function proxied(url) {
+    return el("tokenInput").value.trim() ? url : DEFAULT_PROXY + url;
+  }
+
   // ---------- status / progress ----------
   function setStatus(msg, kind) {
     statusEl.className = kind || "info";
@@ -186,7 +193,7 @@
     callCount++;
     let res;
     try {
-      res = await fetch(rawUrl, { headers: authHeaders() });
+      res = await fetch(proxied(rawUrl), { headers: authHeaders() });
     } catch (e) {
       throw new Error(`Could not reach the OSF API (${e.message}).`);
     }
@@ -303,7 +310,7 @@
     try {
       nodeJson = await apiRequest(`${API}/nodes/${accountId}/?embed=contributors`);
     } catch (e) {
-      throw new Error(`"${accountId}" is not a public OSF account or project, or your token cannot see it. Check the id or link.`);
+      throw new Error(`"${accountId}" is not a public OSF account or project, or it's private. Check the id or link.`);
     }
     const rec = toNodeRecord(nodeJson.data);
     await fetchChildrenRecursive(rec, 1);
@@ -525,7 +532,7 @@
           btn.disabled = true;
           btn.innerHTML = "Fetching&hellip;";
           try {
-            const res = await fetch(w.downloadLink, { headers: authHeaders() });
+            const res = await fetch(proxied(w.downloadLink), { headers: authHeaders() });
             const text = await res.text();
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             downloadBlob(`${folder}/wiki/${sanitizePart(w.name)}.md`, text, "text/markdown");
@@ -591,11 +598,6 @@
   // ---------- form handling ----------
   el("searchForm").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const token = el("tokenInput").value.trim();
-    if (!token) {
-      setStatus("An OSF access token is required. See the field above.", "err");
-      return;
-    }
     const raw = el("accountInput").value;
     const accountId = parseAccountInput(raw);
     if (!accountId) {
