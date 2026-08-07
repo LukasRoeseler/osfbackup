@@ -382,6 +382,12 @@
     return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + units[i];
   }
 
+  function countNodes(nodes) {
+    let n = nodes.length;
+    for (const node of nodes) n += countNodes(node.children);
+    return n;
+  }
+
   function buildProjectIndex(nodes) {
     const out = {};
     for (const n of nodes) {
@@ -411,10 +417,11 @@
       return;
     }
 
+    const totalCount = countNodes(root.tree);
     const toolbar = document.createElement("div");
     toolbar.className = "card toolbar";
     toolbar.innerHTML = `
-      <div class="left"><strong>${escapeHtml(root.label)}</strong> &middot; ${root.tree.length} top-level ${root.tree.length === 1 ? "project" : "projects"}</div>
+      <div class="left"><strong>${escapeHtml(root.label)}</strong> &middot; ${root.tree.length} top-level ${root.tree.length === 1 ? "project" : "projects"}, ${totalCount} total with components. Each has its own separate files; downloading a project does not include its components.</div>
       <div>
         <button id="selectAllBtn" class="ghost small">Select all</button>
         <button id="saveListBtn" class="ghost small">${iconHtml("list")}Save project list</button>
