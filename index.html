@@ -381,6 +381,14 @@
     return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + units[i];
   }
 
+  function buildProjectIndex(nodes) {
+    const out = {};
+    for (const n of nodes) {
+      out[n.id] = { name: n.title, components: buildProjectIndex(n.children) };
+    }
+    return out;
+  }
+
   function downloadBlob(filename, text, type) {
     const blob = new Blob([text], { type: type || "text/plain" });
     const a = document.createElement("a");
@@ -408,6 +416,7 @@
       <div class="left"><strong>${escapeHtml(root.label)}</strong> &middot; ${root.tree.length} top-level ${root.tree.length === 1 ? "project" : "projects"}</div>
       <div>
         <button id="selectAllBtn" class="ghost small">Select all</button>
+        <button id="saveListBtn" class="ghost small">${iconHtml("list")}Save project list</button>
         <button id="downloadSelectedBtn" class="small">${iconHtml("download")}Download selected</button>
       </div>`;
     resultsEl.appendChild(toolbar);
@@ -421,6 +430,14 @@
 
     el("selectAllBtn").addEventListener("click", () => {
       resultsEl.querySelectorAll('input[type=checkbox][data-select]').forEach(cb => cb.checked = true);
+    });
+    el("saveListBtn").addEventListener("click", () => {
+      const projects = buildProjectIndex(root.tree);
+      downloadBlob(
+        `OSF-Backup/${sanitizePart(root.label)}/project-list.json`,
+        JSON.stringify({ account: root.label, projects }, null, 2),
+        "application/json"
+      );
     });
     el("downloadSelectedBtn").addEventListener("click", downloadSelected);
   }
