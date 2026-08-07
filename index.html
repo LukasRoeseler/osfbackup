@@ -204,6 +204,15 @@
       await new Promise(r => setTimeout(r, wait * 1000));
       return apiRequest(rawUrl, attempt + 1);
     }
+    // The public CORS proxy intermittently returns 401 under load even for requests
+    // that succeed moments later, so treat it as transient and retry a few times
+    // before concluding the token (if any) is actually invalid.
+    if (res.status === 401 && !el("tokenInput").value.trim() && attempt < 3) {
+      const wait = 2 * Math.pow(2, attempt); // 2s, 4s, 8s
+      setBusy(`CORS proxy hiccup. Retrying in ${wait}s&hellip;`);
+      await new Promise(r => setTimeout(r, wait * 1000));
+      return apiRequest(rawUrl, attempt + 1);
+    }
     let body;
     try { body = await res.json(); } catch (e) { body = null; }
     if (!res.ok) {
@@ -324,10 +333,21 @@
     try {
       if (node.filesLink) {
         const providers = await apiRequestAllPages(node.filesLink);
-        node.providers = providers.map(p => ({
-          name: p.attributes.name,
-          filesLink: p.relationships.files && p.relationships.files.links.related.href,
-        }));
+        node.providers = providers
+          .map(p => {
+            // Plain OSF Storage exposes its id as attributes.name; linked add-ons
+            // (GitHub, Dropbox, Google Drive, ...) only expose attributes.provider.
+            const name = p.attributes.name || p.attributes.provider;
+            return {
+              name,
+              // OSF's zip-export endpoint (files.osf.io/.../?zip=) only works for
+              // osfstorage; other providers 404 on it, so those fall back to
+              // individual file links instead of a "download as zip" button.
+              zippable: name === "osfstorage",
+              filesLink: p.relationships.files && p.relationships.files.links.related.href,
+            };
+          })
+          .filter(p => p.name && p.filesLink);
       }
     } catch (e) { node.providers = []; node.providersError = e.message; }
     try {
@@ -470,8 +490,11 @@
     holder.innerHTML = "";
     const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
 
-    if (node.providers && node.providers.length) {
-      node.providers.forEach(p => {
+    const zippable = (node.providers || []).filter(p => p.zippable);
+    const other = (node.providers || []).filter(p => !p.zippable);
+
+    if (zippable.length) {
+      zippable.forEach(p => {
         const a = document.createElement("a");
         a.className = "zipbtn";
         a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
@@ -481,11 +504,18 @@
         a.rel = "noopener";
         holder.appendChild(a);
       });
-    } else {
+    } else if (!node.providers || !node.providers.length) {
       const none = document.createElement("span");
       none.className = "hint";
       none.textContent = "No file storage found on this node.";
       holder.appendChild(none);
+    }
+
+    if (other.length) {
+      const note = document.createElement("div");
+      note.className = "hint";
+      note.textContent = `${other.map(p => p.name).join(", ")} ${other.length === 1 ? "doesn't" : "don't"} support zip downloads; use the individual file links below.`;
+      holder.appendChild(note);
     }
 
     const fallbackBtn = document.createElement("button");
@@ -571,6 +601,7 @@
     if (!chosen.length) { setStatus("Nothing selected.", "err"); return; }
     setBusy(`Preparing ${chosen.length} selected item(s)&hellip;`);
     let i = 0;
+    const skipped = [];
     for (const { node, rootTitle } of chosen) {
       i++;
       setBusy(`Preparing downloads (${i}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
@@ -579,6 +610,7 @@
       } catch (e) { continue; }
       const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
       for (const p of node.providers) {
+        if (!p.zippable) { skipped.push(`${node.title} (${p.name})`); continue; }
         const a = document.createElement("a");
         a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
         a.download = `OSF-Backup/${folder} [${p.name}].zip`;
@@ -588,7 +620,8 @@
         await new Promise(r => setTimeout(r, 1200));
       }
     }
-    setStatus(`Started downloads for ${chosen.length} item(s). Allow multiple downloads if your browser asks.`, "ok");
+    const skipNote = skipped.length ? ` Skipped (no zip support, use individual file links): ${skipped.join(", ")}.` : "";
+    setStatus(`Started downloads for ${chosen.length} item(s). Allow multiple downloads if your browser asks.${skipNote}`, "ok");
   }
 
   function escapeHtml(s) {
