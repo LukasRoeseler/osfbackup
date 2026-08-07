@@ -117,6 +117,7 @@
         <input type="text" id="accountInput" placeholder="Enter OSF id or profile link" />
         <button type="submit" id="findBtn"><span class="icn" data-icon="search"></span>Find projects</button>
       </form>
+      <div class="hint">Only public projects and components are listed.</div>
 
       <div id="status"></div>
     </div>
@@ -613,32 +614,49 @@
     holder.appendChild(manifestBtn);
   }
 
+  function summarizeList(names, max) {
+    if (names.length <= max) return names.join(", ");
+    return names.slice(0, max).join(", ") + `, and ${names.length - max} more`;
+  }
+
   async function downloadSelected() {
     const chosen = allNodeRefs.filter(r => r.checkbox.checked);
     if (!chosen.length) { setStatus("Nothing selected.", "err"); return; }
     setBusy(`Preparing ${chosen.length} selected item(s)&hellip;`);
     let i = 0;
-    const skipped = [];
+    let started = 0;
+    const noZip = [];
+    const noFiles = [];
+    const failed = [];
     for (const { node, rootTitle } of chosen) {
       i++;
       setBusy(`Preparing downloads (${i}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
       try {
         await prepareDownloads(node, rootTitle);
-      } catch (e) { continue; }
+      } catch (e) { failed.push(node.title); continue; }
+      if (!node.providers || !node.providers.length) { noFiles.push(node.title); continue; }
       const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
       for (const p of node.providers) {
-        if (!p.zippable) { skipped.push(`${node.title} (${p.name})`); continue; }
+        if (!p.zippable) { noZip.push(`${node.title} (${p.name})`); continue; }
         const a = document.createElement("a");
         a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
         a.download = `OSF-Backup/${folder} [${p.name}].zip`;
         document.body.appendChild(a);
         a.click();
         a.remove();
+        started++;
         await new Promise(r => setTimeout(r, 1200));
       }
     }
-    const skipNote = skipped.length ? ` Skipped (no zip support, use individual file links): ${skipped.join(", ")}.` : "";
-    setStatus(`Started downloads for ${chosen.length} item(s). Allow multiple downloads if your browser asks.${skipNote}`, "ok");
+    const parts = [`Started ${started} zip download(s) from ${chosen.length} selected item(s).`];
+    if (noZip.length) parts.push(`No zip support, use individual file links: ${summarizeList(noZip, 6)}.`);
+    if (noFiles.length) parts.push(`No files found: ${summarizeList(noFiles, 6)}.`);
+    if (failed.length) {
+      parts.push(`Could not load file info, try again: ${summarizeList(failed, 6)}.`);
+      if (!el("tokenInput").value.trim()) parts.push("Bulk downloads without a token rely on a public proxy that can struggle under load; adding a token above is more reliable.");
+    }
+    parts.push("Allow multiple downloads if your browser asks.");
+    setStatus(parts.join(" "), failed.length ? "err" : "ok");
   }
 
   function escapeHtml(s) {
