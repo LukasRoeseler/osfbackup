@@ -21,10 +21,12 @@ You can also select multiple projects/components with the checkboxes and use "Do
 
 Paste **your own** OSF token for **your own** account and you'll see your private projects too, each marked with a Public/Private badge — this isn't a special mode, it's just how OSF's permissions already work (a token authenticates as you, so you see whatever you have access to; without one, or with someone else's public account, you only ever see public content).
 
-A "Export table / draft emails" section appears below the project tree once you have results. It's mainly useful once you have private projects to manage:
+An "Export & Downloads" section appears above the project tree once you have results (there's a left-hand nav to jump straight to it). It's mainly useful once you have private projects to manage:
 
-- **Download table (CSV / XLSX)** — one row per top-level project: id, name, status, admin(s), link, component count, and a note on any component whose visibility differs from its project (components have an independent public/private flag on OSF, so switching a project doesn't cascade to its components).
-- **Draft emails** — an editable template with `[ADMIN]`, `[NAME]`, `[LINK]`, `[ID]` placeholders. Select projects with the checkboxes (there's a "Select all private" shortcut), click Generate, and get one filled-in draft per selected project — skipping any that are already public — as plain text, ready to copy or download.
+- **Download table (CSV / XLSX)** — one row per top-level project: id, name, status, last activity date, admin(s), link, preprint link (if any), component count, and a note on any component whose visibility differs from its project (components have an independent public/private flag on OSF, so switching a project doesn't cascade to its components).
+- **Draft emails** — an editable template with `[ADMIN]`, `[NAME]`, `[LINK]`, `[ID]` placeholders. A summary line above it reports how many of your projects are private and how many you're an admin on. Select projects with the checkboxes (there's a "Select all private" shortcut), click Generate, and get one filled-in draft per selected private project — skipping already-public selections, and skipping any project where you're the only admin, since there's no one else to send it to. When a project has other admins besides you, they're addressed and you're left out of the greeting.
+
+Last activity uses OSF's `date_modified`. A preprint link is only fetched on demand — when you click the "Preprint ↗" badge on a project that has one, or when you export the table — since most projects don't have one and it would otherwise cost an extra request per project during the initial listing.
 
 The XLSX export loads [SheetJS](https://sheetjs.com/) from a CDN on demand; the CSV export and everything else needs no external library.
 

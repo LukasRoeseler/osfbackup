@@ -26,7 +26,18 @@
     margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
     background:var(--bg); color:var(--text); line-height:1.45;
   }
-  .wrap{max-width:920px; margin:0 auto; padding:28px 18px 80px;}
+  .page{max-width:1140px; margin:0 auto; display:flex; align-items:flex-start; gap:8px;}
+  .sidenav{position:sticky; top:0; width:180px; flex:none; padding:28px 8px; display:flex; flex-direction:column; gap:4px;}
+  .sidenav a{color:var(--muted); text-decoration:none; font-size:0.9rem; font-weight:600; padding:8px 12px; border-radius:8px;}
+  .sidenav a:hover{background:var(--panel2); color:var(--accent);}
+  @media (max-width: 860px){
+    .page{display:block;}
+    .sidenav{display:none;}
+    .wrap{margin:0 auto;}
+  }
+  .wrap{max-width:920px; margin:0; padding:28px 18px 80px; flex:1; min-width:0;}
+  .section-heading{font-size:1.7rem; font-weight:700; margin:28px 0 12px;}
+  .section-heading:first-child{margin-top:0;}
   .icn{display:inline-flex; width:16px; height:16px; flex:none;}
   .icn svg{width:100%; height:100%;}
   .hero{position:relative; overflow:hidden;}
@@ -100,16 +111,22 @@
   .filelist a:hover{text-decoration:underline;}
   .filelist .fpath{color:var(--muted);}
   .wikis{margin-top:8px; display:flex; flex-wrap:wrap; gap:6px;}
-  .foot{margin-top:36px; color:var(--muted); font-size:0.82rem; text-align:center;}
+  .foot{margin-top:36px; color:var(--muted); font-size:0.82rem; text-align:center; display:flex; flex-direction:column; gap:6px;}
   .foot a{color:var(--accent);}
   code{font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:0.85em;}
   .empty{color:var(--muted); font-size:0.9rem; padding:8px 2px;}
 </style>
 </head>
 <body>
+<div class="page">
+  <nav class="sidenav">
+    <a href="#top">OSF Backupper</a>
+    <a href="#exportSection">Export &amp; Downloads</a>
+    <a href="#projectsSection">Projects</a>
+  </nav>
 <div class="wrap">
 
-  <section class="card hero">
+  <section class="card hero" id="top">
     <div class="hero-blue"></div>
     <div class="hero-grey"></div>
     <div class="hero-content">
@@ -137,10 +154,14 @@
   <section id="results"></section>
 
   <div class="foot">
-    <a href="https://github.com/LukasRoeseler/osfbackup" target="_blank" rel="noopener">Source on GitHub</a>.
-    <a href="https://github.com/LukasRoeseler/osfbackup/blob/main/README.md" target="_blank" rel="noopener">Readme</a>.
-    Not affiliated with the Center for Open Science.
+    <div>
+      <a href="https://github.com/LukasRoeseler/osfbackup" target="_blank" rel="noopener">Source on GitHub</a>.
+      <a href="https://github.com/LukasRoeseler/osfbackup/blob/main/README.md" target="_blank" rel="noopener">Readme</a>.
+      Not affiliated with the Center for Open Science.
+    </div>
+    <div>Idea: Lukas Röseler, Code: Claude Sonnet 5 and Claude Opus 5. License: <a href="https://github.com/LukasRoeseler/osfbackup/blob/main/LICENSE" target="_blank" rel="noopener">MIT</a>.</div>
   </div>
+</div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -220,6 +241,9 @@
 
   // ---------- fetch with retries ----------
   let callCount = 0;
+  // Whoever the current token belongs to, if any - used to leave the token
+  // owner out of email recipients (nobody needs to email themselves).
+  let currentUser = null;
 
   function apiError(message, status) {
     const e = new Error(message);
@@ -366,11 +390,17 @@
   // Same contributors embed already carries each person's permission level
   // (only visible to someone with access to the node), so admins are free
   // to pull out alongside the general contributor list, no extra request.
+  // Kept as {id, name} rather than bare names so an admin can be matched
+  // reliably against the token owner (names collide; ids don't).
   function adminsFromEmbed(nodeJson) {
     try {
       return nodeJson.embeds.contributors.data
         .filter(c => c.attributes && c.attributes.permission === "admin")
-        .map(c => c.embeds && c.embeds.users && c.embeds.users.data && c.embeds.users.data.attributes && c.embeds.users.data.attributes.full_name)
+        .map(c => {
+          const u = c.embeds && c.embeds.users && c.embeds.users.data;
+          const name = u && u.attributes && u.attributes.full_name;
+          return u && name ? { id: u.id, name } : null;
+        })
         .filter(Boolean);
     } catch (e) { return []; }
   }
@@ -387,9 +417,16 @@
       description: attrs.description || "",
       category: attrs.category || "project",
       dateCreated: attrs.date_created || null,
+      dateModified: attrs.date_modified || null,
       isPublic: !!attrs.public,
       contributors: contributorsFromEmbed(d),
       admins: adminsFromEmbed(d),
+      hasPreprint: !!attrs.preprint,
+      preprintsLink: relHref(d, "preprints"),
+      preprintResolved: false,
+      preprintLink: null,
+      preprintTitle: null,
+      preprintError: null,
       childrenLink: relHref(d, "children"),
       filesLink: relHref(d, "files"),
       wikisLink: relHref(d, "wikis"),
@@ -401,6 +438,41 @@
       providers: [],
       wikis: [],
     };
+  }
+
+  function formatDate(iso) {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 10);
+  }
+
+  // hasPreprint is free (it's on the node we already fetched); the actual link
+  // needs its own request, so that only happens for the few nodes that have one,
+  // and only when something actually wants to show it (a click, or a table export).
+  async function resolvePreprintLink(node) {
+    if (node.preprintResolved) return;
+    if (!node.hasPreprint || !node.preprintsLink) { node.preprintResolved = true; return; }
+    try {
+      const body = await apiRequest(node.preprintsLink);
+      const first = (body.data || [])[0];
+      if (first) {
+        node.preprintLink = (first.links && (first.links.html || first.links.iri)) || null;
+        node.preprintTitle = (first.attributes && first.attributes.title) || null;
+      }
+      node.preprintResolved = true;
+      node.preprintError = null;
+    } catch (e) {
+      // Leave preprintResolved false so a later click or table export can retry.
+      node.preprintError = e.message;
+    }
+  }
+
+  async function resolvePreprintLinksDeep(nodes) {
+    for (const n of nodes) {
+      await resolvePreprintLink(n);
+      await resolvePreprintLinksDeep(n.children || []);
+    }
   }
 
   async function fetchChildrenRecursive(node, depth, visited) {
@@ -430,6 +502,17 @@
 
   async function buildTree(accountId) {
     truncations = [];
+    currentUser = null;
+    if (token()) {
+      try {
+        const me = await apiRequest(`${API}/users/me/`);
+        const a = me.data && me.data.attributes;
+        currentUser = { id: me.data.id, name: (a && a.full_name) || null };
+      } catch (e) {
+        // Not fatal - email drafting just won't be able to exclude the token
+        // owner from admin lists, which only matters once results exist.
+      }
+    }
     setBusy(`Looking up <code>${accountId}</code>&hellip;`);
 
     let userJson = null;
@@ -609,6 +692,8 @@
     }
   }
 
+  // Preprint links must already be resolved (resolvePreprintLinksDeep) before
+  // calling this - it only reads what's on the node, it doesn't fetch anything.
   function flattenForTable(tree) {
     return tree.map(p => {
       const mismatches = [];
@@ -617,17 +702,19 @@
         id: p.id,
         title: p.title,
         status: p.isPublic ? "Public" : "Private",
-        admins: (p.admins || []).join("; "),
+        lastActivity: formatDate(p.dateModified || p.dateCreated) || "",
+        admins: (p.admins || []).map(a => a.name).join("; "),
         link: `https://osf.io/${p.id}/`,
+        preprintLink: p.preprintLink || "",
         componentCount: p.children.length,
         mismatches: mismatches.join("; "),
       };
     });
   }
 
-  const TABLE_HEADERS = ["OSF ID", "Project Name", "Status", "Admin(s)", "Link", "Component Count", "Components With Different Status"];
+  const TABLE_HEADERS = ["OSF ID", "Project Name", "Status", "Last Activity", "Admin(s)", "Link", "Preprint Link", "Component Count", "Components With Different Status"];
   function rowToArray(r) {
-    return [r.id, r.title, r.status, r.admins, r.link, r.componentCount, r.mismatches];
+    return [r.id, r.title, r.status, r.lastActivity, r.admins, r.link, r.preprintLink, r.componentCount, r.mismatches];
   }
 
   function toCsv(rows) {
@@ -647,7 +734,7 @@
     }
     const aoa = [TABLE_HEADERS, ...rows.map(rowToArray)];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 10 }, { wch: 46 }, { wch: 10 }, { wch: 30 }, { wch: 32 }, { wch: 8 }, { wch: 50 }];
+    ws["!cols"] = [{ wch: 10 }, { wch: 46 }, { wch: 10 }, { wch: 12 }, { wch: 30 }, { wch: 32 }, { wch: 32 }, { wch: 8 }, { wch: 50 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Projects");
 
@@ -698,9 +785,18 @@ Best regards,
     return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
   }
 
-  function fillTemplate(tmpl, node) {
+  // Nobody needs to be emailed about their own project, so the token owner
+  // (if known) never appears as a recipient - just as another co-admin would
+  // be dropped if they were the one running this.
+  function adminsExcludingSelf(node) {
+    const admins = node.admins || [];
+    if (!currentUser) return admins;
+    return admins.filter(a => a.id !== currentUser.id);
+  }
+
+  function fillTemplate(tmpl, node, adminNames) {
     return tmpl
-      .split("[ADMIN]").join(joinNames(node.admins || []))
+      .split("[ADMIN]").join(joinNames(adminNames))
       .split("[NAME]").join(node.title)
       .split("[LINK]").join(`https://osf.io/${node.id}/`)
       .split("[ID]").join(node.id);
@@ -780,6 +876,14 @@ Best regards,
       <button id="saveListBtn" class="ghost small">${iconHtml("list")}Save project list</button>
       <button id="downloadSelectedBtn" class="small">${iconHtml("download")}Download selected</button>`;
     toolbar.appendChild(btns);
+
+    resultsEl.appendChild(renderExportPanel(root));
+
+    const projectsHeading = document.createElement("h2");
+    projectsHeading.className = "section-heading";
+    projectsHeading.id = "projectsSection";
+    projectsHeading.textContent = "Projects";
+    resultsEl.appendChild(projectsHeading);
     resultsEl.appendChild(toolbar);
 
     const list = document.createElement("div");
@@ -788,8 +892,6 @@ Best regards,
     list.style.gap = "10px";
     root.tree.forEach(node => list.appendChild(renderNode(node, root.label)));
     resultsEl.appendChild(list);
-
-    resultsEl.appendChild(renderExportPanel(root));
 
     el("selectAllBtn").addEventListener("click", () => {
       resultsEl.querySelectorAll('input[type=checkbox][data-select]').forEach(cb => cb.checked = true);
@@ -812,6 +914,11 @@ Best regards,
   // are just backing up someone else's public account and never need this, so it
   // only has to be discoverable, not front-and-center.
   function renderExportPanel(root) {
+    const sectionHeading = document.createElement("h2");
+    sectionHeading.className = "section-heading";
+    sectionHeading.id = "exportSection";
+    sectionHeading.textContent = "Export & Downloads";
+
     const card = document.createElement("div");
     card.className = "card export-panel";
 
@@ -821,7 +928,7 @@ Best regards,
 
     const tableHint = document.createElement("div");
     tableHint.className = "hint";
-    tableHint.textContent = "A flat table of every top-level project: id, name, status, admin(s), link, and a note on any component whose visibility differs from its project. Private projects only show up here if the token above belongs to an account that can see them.";
+    tableHint.textContent = "A flat table of every top-level project: id, name, status, last activity date, admin(s), link, preprint link (if any), and a note on any component whose visibility differs from its project. Private projects only show up here if the token above belongs to an account that can see them.";
     card.appendChild(tableHint);
 
     const tableRow = document.createElement("div");
@@ -836,13 +943,35 @@ Best regards,
     tableRow.appendChild(xlsxBtn);
     card.appendChild(tableRow);
 
-    csvBtn.addEventListener("click", () => {
-      const rows = flattenForTable(root.tree);
+    async function withPreprintsResolved(btn, run) {
+      const original = btn.innerHTML;
+      btn.disabled = true;
+      btn.textContent = "Checking for preprints&hellip;";
+      try {
+        await resolvePreprintLinksDeep(root.tree);
+        run(flattenForTable(root.tree));
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    }
+    csvBtn.addEventListener("click", () => withPreprintsResolved(csvBtn, rows => {
       downloadBlob(`OSF-Backup/${sanitizePart(root.label)}/projects.csv`, toCsv(rows), "text/csv;charset=utf-8");
-    });
-    xlsxBtn.addEventListener("click", () => {
-      downloadXlsx(flattenForTable(root.tree), root.label);
-    });
+    }));
+    xlsxBtn.addEventListener("click", () => withPreprintsResolved(xlsxBtn, rows => {
+      downloadXlsx(rows, root.label);
+    }));
+
+    const privateTopLevel = root.tree.filter(n => !n.isPublic);
+    const report = document.createElement("div");
+    report.className = "hint";
+    if (currentUser) {
+      const yourAdminCount = privateTopLevel.filter(n => (n.admins || []).some(a => a.id === currentUser.id)).length;
+      report.textContent = `${privateTopLevel.length} project(s) are private. You (${currentUser.name || "token owner"}) are an admin on ${yourAdminCount} of them.`;
+    } else if (privateTopLevel.length) {
+      report.textContent = `${privateTopLevel.length} project(s) are private.`;
+    }
+    if (report.textContent) card.appendChild(report);
 
     const emailHint = document.createElement("div");
     emailHint.className = "hint";
@@ -914,23 +1043,45 @@ Best regards,
         return;
       }
 
-      const drafts = privateChosen.map(r => {
+      // No email is written for a project whose only admin(s) are the token
+      // owner - there's no one else to send it to.
+      const skippedSelfOnly = [];
+      const drafts = [];
+      privateChosen.forEach(r => {
+        const others = adminsExcludingSelf(r.node);
+        if (currentUser && (r.node.admins || []).length && !others.length) {
+          skippedSelfOnly.push(r.node.title);
+          return;
+        }
         const sep = "=".repeat(60);
-        return `${sep}\n${r.node.title} (${r.node.id})\n${sep}\n\n${fillTemplate(tmpl, r.node)}`;
+        drafts.push(`${sep}\n${r.node.title} (${r.node.id})\n${sep}\n\n${fillTemplate(tmpl, r.node, others.map(a => a.name))}`);
       });
+
+      if (!drafts.length) {
+        emailStatus.textContent = `You're the only admin on all ${skippedSelfOnly.length} selected private project(s) - nothing to draft.`;
+        outputArea.style.display = "none";
+        downloadTxtBtn.style.display = "none";
+        return;
+      }
+
       lastDraftText = drafts.join("\n\n\n");
       outputArea.value = lastDraftText;
       outputArea.style.display = "";
       downloadTxtBtn.style.display = "";
-      emailStatus.textContent = `Drafted ${privateChosen.length} email(s).` +
-        (skippedPublic ? ` Skipped ${skippedPublic} already-public selection(s).` : "");
+      const parts = [`Drafted ${drafts.length} email(s).`];
+      if (skippedPublic) parts.push(`Skipped ${skippedPublic} already-public selection(s).`);
+      if (skippedSelfOnly.length) parts.push(`Skipped ${skippedSelfOnly.length} where you're the only admin: ${summarizeList(skippedSelfOnly, 6)}.`);
+      emailStatus.textContent = parts.join(" ");
     });
 
     downloadTxtBtn.addEventListener("click", () => {
       downloadBlob(`OSF-Backup/${sanitizePart(root.label)}/email-drafts.txt`, lastDraftText, "text/plain;charset=utf-8");
     });
 
-    return card;
+    const wrap = document.createElement("div");
+    wrap.appendChild(sectionHeading);
+    wrap.appendChild(card);
+    return wrap;
   }
 
   function renderNode(node, accountLabel) {
@@ -949,18 +1100,46 @@ Best regards,
     const meta = document.createElement("div");
     meta.className = "meta";
     const contrib = node.contributors.length ? node.contributors.join(", ") : "";
-    const year = node.dateCreated ? new Date(node.dateCreated).getFullYear() : null;
-    const yearText = Number.isFinite(year) ? String(year) : "";
+    const lastActivity = formatDate(node.dateModified || node.dateCreated);
+    const subParts = [];
+    if (contrib) subParts.push(escapeHtml(contrib));
+    if (lastActivity) subParts.push(`Last activity: ${lastActivity}`);
     meta.innerHTML = `
       <div class="title-line">
         <a href="https://osf.io/${encodeURIComponent(node.id)}/" target="_blank" rel="noopener">${escapeHtml(node.title)}</a>
         <span class="badge">${escapeHtml(node.category)}</span>
         <span class="badge ${node.isPublic ? "status-public" : "status-private"}">${node.isPublic ? "Public" : "Private"}</span>
         ${node.orphanParentId ? `<span class="badge orphan">component of ${escapeHtml(node.orphanParentId)} (parent not accessible)</span>` : ""}
+        <span class="preprint-slot"></span>
       </div>
-      <div class="sub">${contrib ? escapeHtml(contrib) : ""}${yearText ? (contrib ? " &middot; " : "") + yearText : ""}</div>
+      <div class="sub">${subParts.join(" &middot; ")}</div>
       ${node.description ? `<div class="desc">${escapeHtml(node.description)}</div>` : ""}
     `;
+
+    if (node.hasPreprint) {
+      const slot = meta.querySelector(".preprint-slot");
+      const pbtn = document.createElement("button");
+      pbtn.className = "ghost small";
+      pbtn.style.padding = "1px 8px";
+      pbtn.style.fontSize = "0.7rem";
+      pbtn.textContent = "Preprint ↗";
+      pbtn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        if (node.preprintLink) { window.open(node.preprintLink, "_blank", "noopener"); return; }
+        if (node.preprintResolved) { pbtn.textContent = node.preprintError ? "Preprint (failed)" : "No preprint link found"; return; }
+        pbtn.disabled = true;
+        pbtn.textContent = "Looking up&hellip;";
+        await resolvePreprintLink(node);
+        pbtn.disabled = false;
+        if (node.preprintLink) {
+          pbtn.textContent = "Preprint ↗";
+          window.open(node.preprintLink, "_blank", "noopener");
+        } else {
+          pbtn.textContent = node.preprintError ? "Preprint (failed, retry)" : "No preprint link found";
+        }
+      });
+      slot.appendChild(pbtn);
+    }
 
     const actions = document.createElement("div");
     actions.className = "actions";
