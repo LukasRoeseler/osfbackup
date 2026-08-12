@@ -24,6 +24,7 @@ Actual file *downloads* never need a token: they're generated as plain links str
 - Only reads **public** projects/components/wikis; there's no OSF login flow beyond the optional token, by design.
 - Without a token, requests go through a public third-party CORS proxy (`proxy.cors.sh`), which can be slower or occasionally unavailable; a token avoids this entirely.
 - Storage add-ons other than OSF Storage (linked GitHub/Dropbox/Google Drive) aren't included in the zip export; use the individual-file fallback or the OSF page link for those.
+- OSF's own zip-export endpoint can occasionally return a structurally invalid zip (confirmed independently of this app, via direct download + `unzip -t`), seemingly more often for larger projects and/or filenames with non-ASCII characters. This is a server-side limitation, not something this app can fix. Always open a downloaded zip to confirm it's intact; if it isn't, use "List individual file links" for that project/component instead.
 - The suggested nested-folder filenames (`download="OSF-Backup/Project/Component.zip"`) are honored by Chromium-based browsers; Firefox/Safari will save them as flat filenames in your default downloads folder instead.
 - Triggering many downloads in a row may hit your browser's "multiple downloads" prompt; allow it for this site if asked.
 
