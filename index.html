@@ -102,20 +102,56 @@
   .export-panel{display:flex; flex-direction:column; gap:14px;}
   .export-panel h3{margin:0; font-size:1rem;}
   .export-panel .row{display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
-  .node .sub{font-size:0.82rem; color:var(--muted); margin-top:2px;}
-  .node .desc{font-size:0.85rem; color:var(--muted); margin-top:6px; max-width:640px;}
-  .node .actions{margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
-  .node .actions a.zipbtn{
+  /* Not scoped to .node: these are reused inside the project table's detail rows. */
+  .sub{font-size:0.82rem; color:var(--muted); margin-top:2px;}
+  .desc{font-size:0.85rem; color:var(--muted); margin-top:6px; max-width:640px;}
+  .actions{margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
+  a.zipbtn, button.zipbtn{
     display:inline-flex; align-items:center; gap:7px; background:var(--accent2); color:#fff;
-    text-decoration:none; border-radius:8px; padding:7px 12px; font-size:0.85rem; font-weight:600;
+    text-decoration:none; border:none; cursor:pointer; border-radius:8px; padding:7px 12px;
+    font-size:0.85rem; font-weight:600;
   }
-  .node .actions a.zipbtn:hover{filter:brightness(1.08);}
+  a.zipbtn:hover, button.zipbtn:hover{filter:brightness(1.08);}
   .filelist{margin-top:8px; font-size:0.83rem; max-height:220px; overflow:auto; border:1px solid var(--border);
     border-radius:6px; background:var(--panel2); padding:6px 10px;}
   .filelist a{color:var(--accent); text-decoration:none; display:block; padding:2px 0; word-break:break-all;}
   .filelist a:hover{text-decoration:underline;}
   .filelist .fpath{color:var(--muted);}
   .wikis{margin-top:8px; display:flex; flex-wrap:wrap; gap:6px;}
+  /* ---- project table ---- */
+  .filterbar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px;}
+  .filterbar input[type=text]{flex:1 1 220px; min-width:180px; padding:7px 10px; font-size:0.88rem;}
+  .filterbar select{background:var(--panel2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:7px 10px; font-size:0.88rem;}
+  .ptable{width:100%; border-collapse:collapse; font-size:0.88rem;}
+  .ptable th{
+    text-align:left; font-size:0.75rem; text-transform:uppercase; letter-spacing:.03em; color:var(--muted);
+    border-bottom:1px solid var(--border); padding:8px 8px; white-space:nowrap; user-select:none;
+  }
+  .ptable th.sortable{cursor:pointer;}
+  .ptable th.sortable:hover{color:var(--accent);}
+  .ptable td{border-bottom:1px solid var(--border); padding:7px 8px; vertical-align:top;}
+  .ptable tr.child-row > td:first-child{padding-left:26px;}
+  .ptable tr.hidden-row{display:none;}
+  .ptable tbody tr:hover{background:var(--panel2);}
+  .ptable .col-check{width:28px;}
+  .ptable .col-status, .ptable .col-date, .ptable .col-comp, .ptable .col-dl{white-space:nowrap;}
+  .ptable .col-comp{text-align:center;}
+  .ptable .ttl{display:flex; align-items:baseline; gap:6px; flex-wrap:wrap;}
+  .ptable .ttl a{color:var(--text); font-weight:600; text-decoration:none;}
+  .ptable .ttl a:hover{color:var(--accent);}
+  .ptable .nid{font-family:var(--mono); font-size:0.75rem; color:var(--muted);}
+  .twisty{background:none; border:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:0.8rem;
+    width:18px; display:inline-flex; justify-content:center;}
+  .twisty:hover{color:var(--accent); background:none;}
+  .twisty-spacer{display:inline-block; width:18px;}
+  .muted-cell{color:var(--muted);}
+  .dl-ok{color:var(--good); font-weight:600;}
+  .dl-bad{color:var(--bad); font-weight:600;}
+  .dl-started{color:var(--warn);}
+  .detail-row > td{background:var(--panel2); padding:12px 14px;}
+  .rowbtn{padding:4px 9px; font-size:0.78rem; font-weight:500;}
+  .tablefoot{margin-top:10px; font-size:0.8rem; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
   .foot{margin-top:36px; color:var(--muted); font-size:0.82rem; text-align:center; display:flex; flex-direction:column; gap:6px;}
   .foot a{color:var(--accent);}
   code{font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:0.85em;}
@@ -834,6 +870,190 @@ Best regards,
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
   }
 
+  // ---------- OSF zip repair ----------
+  // OSF's zip export writes each filename as CP437 bytes but declares that
+  // entry's filename_length computed from the name's UTF-8 encoding. Every
+  // non-ASCII character therefore over-declares the length by one byte, so a
+  // reader walking the central directory drifts and lands mid-signature on the
+  // next record ("K\x01\x02" instead of "PK\x01\x02"), losing every entry from
+  // the first umlaut onwards. The file data and the local file headers are
+  // correct - only the central directory index is wrong - so the fix is to put
+  // the true length (read from the local header) back into each central record.
+  // Nothing moves, so every stored offset and size stays valid.
+  const ZIP = {
+    LOCAL: 0x04034b50, CENTRAL: 0x02014b50, EOCD: 0x06054b50,
+    Z64_EOCD: 0x06064b50, Z64_LOC: 0x07064b50,
+  };
+
+  function repairOsfZip(buf) {
+    const u8 = new Uint8Array(buf);
+    const dv = new DataView(buf);
+    const sigAt = (p) => (p >= 0 && p + 4 <= u8.length ? dv.getUint32(p, true) : 0);
+
+    // EOCD lives at the end, after an optional comment of up to 64 KB.
+    let eocd = -1;
+    const floor = Math.max(0, u8.length - 22 - 65535);
+    for (let p = u8.length - 22; p >= floor; p--) {
+      if (sigAt(p) === ZIP.EOCD) { eocd = p; break; }
+    }
+    if (eocd < 0) throw new Error("Not a zip file (no end-of-central-directory record).");
+
+    let nrec = dv.getUint16(eocd + 10, true);
+    let cdOffset = dv.getUint32(eocd + 16, true);
+    let cdSize = dv.getUint32(eocd + 12, true);
+
+    // These archives are Zip64 (streamed, local sizes 0xFFFFFFFF), so this is
+    // the branch that actually runs for large projects - not just a safety net.
+    const loc = eocd - 20;
+    if (sigAt(loc) === ZIP.Z64_LOC) {
+      const z64 = Number(dv.getBigUint64(loc + 8, true));
+      if (sigAt(z64) === ZIP.Z64_EOCD) {
+        nrec = Number(dv.getBigUint64(z64 + 32, true));
+        cdSize = Number(dv.getBigUint64(z64 + 40, true));
+        cdOffset = Number(dv.getBigUint64(z64 + 48, true));
+      }
+    }
+
+    const cdEnd = cdOffset + cdSize;
+    let p = cdOffset, fixed = 0, walked = 0;
+
+    for (; walked < nrec; walked++) {
+      if (sigAt(p) !== ZIP.CENTRAL) {
+        throw new Error(`Central directory is damaged in a way this repair does not cover (record ${walked + 1} of ${nrec}).`);
+      }
+      const declaredFnl = dv.getUint16(p + 28, true);
+      const efl = dv.getUint16(p + 30, true);
+      const fcl = dv.getUint16(p + 32, true);
+      const lho = dv.getUint32(p + 42, true);
+
+      let trueFnl = null;
+      if (lho !== 0xFFFFFFFF && sigAt(lho) === ZIP.LOCAL) {
+        // Authoritative: the local header's own filename_length is correct.
+        trueFnl = dv.getUint16(lho + 26, true);
+      } else {
+        // Zip64 (>4 GB): the real local offset sits in the extra field, which
+        // starts after the name whose length we are trying to establish. Probe
+        // candidate lengths and take the one whose record ends exactly on the
+        // next record's signature (or on the end of the central directory).
+        for (let cand = declaredFnl; cand >= 0 && cand >= declaredFnl - 16; cand--) {
+          const next = p + 46 + cand + efl + fcl;
+          if ((next === cdEnd && walked === nrec - 1) || sigAt(next) === ZIP.CENTRAL) { trueFnl = cand; break; }
+        }
+        if (trueFnl === null) throw new Error(`Could not determine the true filename length for record ${walked + 1}.`);
+      }
+
+      if (trueFnl !== declaredFnl) { dv.setUint16(p + 28, trueFnl, true); fixed++; }
+      p += 46 + trueFnl + efl + fcl;
+    }
+
+    // Self-check: a correct walk consumes every record and stops exactly at the
+    // end of the central directory. Anything else means we must not claim success.
+    if (walked !== nrec) throw new Error(`Walked ${walked} of ${nrec} central directory records.`);
+    if (p !== cdEnd) throw new Error(`Central directory walk ended at ${p}, expected ${cdEnd}.`);
+    return { recordsWalked: walked, fieldsFixed: fixed };
+  }
+
+  function zipUrlFor(nodeId, provider) {
+    return `${FILES}/resources/${encodeURIComponent(nodeId)}/providers/${encodeURIComponent(provider)}/?zip=`;
+  }
+
+  // Streams the archive, repairs it if needed, and saves it. Requires a token:
+  // files.osf.io only sends CORS headers back when the request is authenticated.
+  async function fetchRepairAndSave(node, provider, filename, onProgress) {
+    const res = await fetch(zipUrlFor(node.id, provider), { headers: authHeaders() });
+    if (!res.ok) throw apiError(`OSF returned ${res.status} for the zip download.`, res.status);
+
+    // Chunked response, so there is no Content-Length to make a percentage from.
+    const chunks = [];
+    let total = 0;
+    if (res.body && res.body.getReader) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.length;
+        if (onProgress) onProgress(total);
+      }
+    } else {
+      const ab = await res.arrayBuffer();
+      chunks.push(new Uint8Array(ab));
+      total = ab.byteLength;
+    }
+
+    let buf;
+    try {
+      buf = new ArrayBuffer(total);
+      const out = new Uint8Array(buf);
+      let at = 0;
+      for (const c of chunks) { out.set(c, at); at += c.length; }
+      chunks.length = 0;
+    } catch (e) {
+      throw new Error(`This archive (${humanSize(total)}) is too large for the browser to hold in memory. Use the individual file links instead.`);
+    }
+
+    let result = null, repairError = null;
+    try {
+      result = repairOsfZip(buf);
+    } catch (e) {
+      repairError = e.message;
+    }
+    // Even when the repair fails we still save what OSF sent: a failed repair
+    // must never cost the user the download they already waited for.
+    downloadBlob(filename, buf, "application/zip");
+    return { bytes: total, result, repairError };
+  }
+
+  // ---------- download state (persisted per node id) ----------
+  // Kept across reloads so a migration spanning several sessions doesn't lose
+  // track of what has already been fetched. Only the token path can honestly
+  // claim "downloaded": a plain link click reports nothing back to the page.
+  const DL_KEY = "osfbackupper.downloads.v1";
+  let downloadMarks = {};
+  try { downloadMarks = JSON.parse(localStorage.getItem(DL_KEY) || "{}") || {}; } catch (e) { downloadMarks = {}; }
+  function persistDownloadMarks() {
+    try { localStorage.setItem(DL_KEY, JSON.stringify(downloadMarks)); } catch (e) { /* storage full or blocked */ }
+  }
+  function markDownloaded(nodeId, mark) {
+    downloadMarks[nodeId] = Object.assign({ at: new Date().toISOString() }, mark);
+    persistDownloadMarks();
+    refreshDownloadCell(nodeId);
+  }
+  function downloadMarkOf(nodeId) { return downloadMarks[nodeId] || null; }
+  function describeMark(mark) {
+    if (!mark) return { text: "—", cls: "muted-cell" };
+    if (mark.state === "ok") {
+      return { text: mark.fixed ? `Repaired ${mark.fixed}` : "Downloaded", cls: "dl-ok" };
+    }
+    if (mark.state === "failed") return { text: "Failed", cls: "dl-bad" };
+    if (mark.state === "started") return { text: "Started", cls: "dl-started" };
+    return { text: "—", cls: "muted-cell" };
+  }
+
+  async function runSingleZipDownload(node, provider, folder, btn) {
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    try {
+      const r = await fetchRepairAndSave(node, provider, `${folder} [${provider}].zip`,
+        (bytes) => { btn.textContent = `Downloading ${humanSize(bytes)}…`; });
+      if (r.repairError) {
+        markDownloaded(node.id, { state: "failed", note: r.repairError });
+        setStatusText(`Saved "${node.title}" (${humanSize(r.bytes)}) but could not repair it: ${r.repairError} The file is as OSF sent it; use the individual file links if it will not open.`, "err");
+      } else {
+        markDownloaded(node.id, { state: "ok", fixed: r.result.fieldsFixed, bytes: r.bytes });
+        setStatusText(r.result.fieldsFixed
+          ? `Downloaded "${node.title}" (${humanSize(r.bytes)}) and repaired ${r.result.fieldsFixed} corrupted filename entr${r.result.fieldsFixed === 1 ? "y" : "ies"} across ${r.result.recordsWalked} files.`
+          : `Downloaded "${node.title}" (${humanSize(r.bytes)}). Archive was already valid (${r.result.recordsWalked} files).`, "ok");
+      }
+    } catch (e) {
+      markDownloaded(node.id, { state: "failed", note: e.message });
+      setStatusText(`Download failed for "${node.title}": ${e.message}`, "err");
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  }
+
   // ---------- rendering ----------
   let allNodeRefs = []; // {node, accountLabel, checkbox} for "download selected"
   let downloading = false;
@@ -862,10 +1082,15 @@ Best regards,
     renderTruncationWarnings(resultsEl);
 
     if (!root.tree.length) {
+      // Keep the section anchors the sidebar points at, even with no results.
+      const h = document.createElement("h2");
+      h.className = "section-heading";
+      h.id = "projectsSection";
+      h.textContent = "Projects";
       const empty = document.createElement("div");
       empty.className = "card empty";
       empty.textContent = "No projects found for this account (or none visible without a token).";
-      resultsEl.appendChild(empty);
+      resultsEl.append(h, empty);
       return;
     }
 
@@ -908,15 +1133,11 @@ Best regards,
     resultsEl.appendChild(projectsHeading);
     resultsEl.appendChild(toolbar);
 
-    const list = document.createElement("div");
-    list.style.display = "flex";
-    list.style.flexDirection = "column";
-    list.style.gap = "10px";
-    root.tree.forEach(node => list.appendChild(renderNode(node, root.label)));
-    resultsEl.appendChild(list);
+    resultsEl.appendChild(renderProjectTable(root));
 
     el("selectAllBtn").addEventListener("click", () => {
-      resultsEl.querySelectorAll('input[type=checkbox][data-select]').forEach(cb => cb.checked = true);
+      // Only what the user can currently see, so filtering composes with bulk actions.
+      allNodeRefs.forEach(r => { if (isRowVisible(r)) r.checkbox.checked = true; });
     });
     el("saveListBtn").addEventListener("click", () => {
       downloadBlob(
@@ -1039,7 +1260,8 @@ Best regards,
     card.appendChild(downloadTxtBtn);
 
     selectPrivateBtn.addEventListener("click", () => {
-      allNodeRefs.forEach(r => { r.checkbox.checked = !r.node.isPublic; });
+      // Visible rows only, so this composes with the table's filters.
+      allNodeRefs.forEach(r => { if (isRowVisible(r)) r.checkbox.checked = !r.node.isPublic; });
     });
     clearBtn.addEventListener("click", () => {
       allNodeRefs.forEach(r => { r.checkbox.checked = false; });
@@ -1106,104 +1328,342 @@ Best regards,
     return wrap;
   }
 
-  function renderNode(node, accountLabel) {
+  // ---------- project table ----------
+  // Rows are flattened (project followed by its components) rather than nested,
+  // because a table can only nest visually. Child rows start collapsed, which is
+  // what keeps an 88-project account scannable instead of endlessly scrollable.
+  let tableFilters = { text: "", status: "all", dl: "all" };
+  let tableSort = { key: "none", dir: 1 };
+
+  function isRowVisible(ref) {
+    return !!(ref.tr && !ref.tr.classList.contains("hidden-row"));
+  }
+
+  function refreshDownloadCell(nodeId) {
+    allNodeRefs.filter(r => r.node.id === nodeId).forEach(r => {
+      if (!r.dlCell) return;
+      const d = describeMark(downloadMarkOf(nodeId));
+      r.dlCell.textContent = d.text;
+      r.dlCell.className = "col-dl " + d.cls;
+    });
+  }
+
+  function renderProjectTable(root) {
     const wrap = document.createElement("div");
-    wrap.className = "node";
+    wrap.className = "card";
 
-    const row = document.createElement("div");
-    row.className = "row";
+    // --- filter bar ---
+    const bar = document.createElement("div");
+    bar.className = "filterbar";
+    const search = document.createElement("input");
+    search.type = "text";
+    search.placeholder = "Filter by title or OSF id…";
+    const statusSel = document.createElement("select");
+    [["all", "All statuses"], ["private", "Private only"], ["public", "Public only"]]
+      .forEach(([v, t]) => statusSel.appendChild(new Option(t, v)));
+    const dlSel = document.createElement("select");
+    [["all", "Any download state"], ["no", "Not downloaded"], ["yes", "Downloaded"]]
+      .forEach(([v, t]) => dlSel.appendChild(new Option(t, v)));
+    const expandBtn = document.createElement("button");
+    expandBtn.className = "ghost small";
+    expandBtn.textContent = "Expand all";
+    bar.append(search, statusSel, dlSel, expandBtn);
+    wrap.appendChild(bar);
 
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.setAttribute("data-select", "1");
-    row.appendChild(cb);
-    allNodeRefs.push({ node, accountLabel, checkbox: cb });
+    // --- table ---
+    const table = document.createElement("table");
+    table.className = "ptable";
+    const thead = document.createElement("thead");
+    thead.innerHTML = `<tr>
+      <th class="col-check"></th>
+      <th class="sortable" data-sort="title">Project</th>
+      <th class="col-status sortable" data-sort="status">Status</th>
+      <th class="col-date sortable" data-sort="date">Last activity</th>
+      <th class="col-comp">Comp.</th>
+      <th class="col-dl">Downloaded</th>
+      <th class="col-act">Actions</th>
+    </tr>`;
+    table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    table.appendChild(tbody);
+    wrap.appendChild(table);
 
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    const contrib = node.contributors.length ? node.contributors.join(", ") : "";
-    const lastActivity = formatDate(node.dateModified || node.dateCreated);
-    const subParts = [];
-    if (contrib) subParts.push(escapeHtml(contrib));
-    if (lastActivity) subParts.push(`Last activity: ${lastActivity}`);
-    meta.innerHTML = `
-      <div class="title-line">
-        <a href="https://osf.io/${encodeURIComponent(node.id)}/" target="_blank" rel="noopener">${escapeHtml(node.title)}</a>
-        <span class="badge">${escapeHtml(node.category)}</span>
-        <span class="badge ${node.isPublic ? "status-public" : "status-private"}">${node.isPublic ? "Public" : "Private"}</span>
-        ${node.orphanParentId ? `<span class="badge orphan">component of ${escapeHtml(node.orphanParentId)} (parent not accessible)</span>` : ""}
-        <span class="preprint-slot"></span>
-      </div>
-      <div class="sub">${subParts.join(" &middot; ")}</div>
-      ${node.description ? `<div class="desc">${escapeHtml(node.description)}</div>` : ""}
-    `;
+    const foot = document.createElement("div");
+    foot.className = "tablefoot";
+    const countLbl = document.createElement("span");
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "ghost small";
+    resetBtn.textContent = "Reset download marks";
+    foot.append(countLbl, resetBtn);
+    wrap.appendChild(foot);
 
-    if (node.hasPreprint) {
-      const slot = meta.querySelector(".preprint-slot");
-      const pbtn = document.createElement("button");
-      pbtn.className = "ghost small";
-      pbtn.style.padding = "1px 8px";
-      pbtn.style.fontSize = "0.7rem";
-      pbtn.textContent = "Preprint ↗";
-      pbtn.addEventListener("click", async (ev) => {
-        ev.preventDefault();
-        if (node.preprintLink) { window.open(node.preprintLink, "_blank", "noopener"); return; }
-        if (node.preprintResolved) { pbtn.textContent = node.preprintError ? "Preprint (failed)" : "No preprint link found"; return; }
-        pbtn.disabled = true;
-        pbtn.textContent = "Looking up&hellip;";
-        await resolvePreprintLink(node);
-        pbtn.disabled = false;
-        if (node.preprintLink) {
-          pbtn.textContent = "Preprint ↗";
-          window.open(node.preprintLink, "_blank", "noopener");
-        } else {
-          pbtn.textContent = node.preprintError ? "Preprint (failed, retry)" : "No preprint link found";
-        }
+    // --- build rows ---
+    // Flattened depth-first: each project is immediately followed by its
+    // components, which lets one <tbody> represent the tree.
+    const buildRows = (nodes, depth, parentRef) => {
+      sortNodes(nodes).forEach(node => {
+        const ref = addRow(node, depth, parentRef, root.label, tbody);
+        if (node.children.length) buildRows(node.children, depth + 1, ref);
       });
-      slot.appendChild(pbtn);
+    };
+
+    function sortNodes(nodes) {
+      if (tableSort.key === "none") return nodes;
+      const copy = nodes.slice();
+      copy.sort((a, b) => {
+        let av, bv;
+        if (tableSort.key === "title") { av = a.title.toLowerCase(); bv = b.title.toLowerCase(); }
+        else if (tableSort.key === "status") { av = a.isPublic ? 1 : 0; bv = b.isPublic ? 1 : 0; }
+        else { av = a.dateModified || a.dateCreated || ""; bv = b.dateModified || b.dateCreated || ""; }
+        return (av < bv ? -1 : av > bv ? 1 : 0) * tableSort.dir;
+      });
+      return copy;
     }
 
-    const actions = document.createElement("div");
-    actions.className = "actions";
-    const prepBtn = document.createElement("button");
-    prepBtn.className = "ghost small";
-    prepBtn.innerHTML = `${iconHtml("folder")}Get download links`;
-    const actionsHolder = document.createElement("div");
-    actions.appendChild(prepBtn);
-    actions.appendChild(actionsHolder);
+    const rebuild = () => {
+      tbody.innerHTML = "";
+      allNodeRefs = [];
+      buildRows(root.tree, 0, null);
+      // Rebuilt rows start collapsed, so the toggle must agree with them.
+      expandBtn.textContent = "Expand all";
+      applyFilters();
+    };
 
-    prepBtn.addEventListener("click", async () => {
-      prepBtn.disabled = true;
-      prepBtn.innerHTML = "Loading&hellip;";
-      try {
-        await prepareDownloads(node);
-        renderDownloadOptions(node, accountLabel, actionsHolder);
-        prepBtn.remove();
-      } catch (e) {
-        // Distinct from "no files": this node's file list could not be loaded and
-        // the button stays available so the user can actually retry.
-        node.loadError = e.message;
-        prepBtn.disabled = false;
-        prepBtn.innerHTML = `${iconHtml("folder")}Could not load file info - retry`;
-        actionsHolder.innerHTML = "";
-        const err = document.createElement("div");
-        err.className = "warnline";
-        err.textContent = e.message;
-        actionsHolder.appendChild(err);
+    function applyFilters() {
+      const q = tableFilters.text.trim().toLowerCase();
+      let shown = 0;
+      allNodeRefs.forEach(ref => {
+        const n = ref.node;
+        let ok = true;
+        if (q) ok = n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q);
+        if (ok && tableFilters.status !== "all") ok = tableFilters.status === "public" ? n.isPublic : !n.isPublic;
+        if (ok && tableFilters.dl !== "all") {
+          const has = !!downloadMarkOf(n.id);
+          ok = tableFilters.dl === "yes" ? has : !has;
+        }
+        // A child stays hidden while its parent is collapsed, unless a filter is
+        // active - then matches must surface wherever they live in the tree.
+        const filtering = !!q || tableFilters.status !== "all" || tableFilters.dl !== "all";
+        const collapsedAncestor = !filtering && hasCollapsedAncestor(ref);
+        const visible = ok && !collapsedAncestor;
+        ref.tr.classList.toggle("hidden-row", !visible);
+        // Keep an opened detail row in step with its parent row, and restore it
+        // when the row comes back into view rather than leaving it stuck hidden.
+        if (ref.detailRow) ref.detailRow.classList.toggle("hidden-row", !(visible && ref.detailOpen));
+        if (visible) shown++;
+      });
+      countLbl.textContent = `${shown} of ${allNodeRefs.length} rows shown`;
+    }
+
+    function hasCollapsedAncestor(ref) {
+      let p = ref.parentRef;
+      while (p) { if (!p.expanded) return true; p = p.parentRef; }
+      return false;
+    }
+
+    function addRow(node, depth, parentRef, accountLabel, body) {
+      const tr = document.createElement("tr");
+      if (depth > 0) tr.className = "child-row";
+      const ref = { node, accountLabel, depth, parentRef, tr, expanded: false, detailRow: null };
+
+      // checkbox
+      const tdC = document.createElement("td");
+      tdC.className = "col-check";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.setAttribute("data-select", "1");
+      tdC.appendChild(cb);
+      ref.checkbox = cb;
+
+      // title (+ twisty, badges, preprint)
+      const tdT = document.createElement("td");
+      const ttl = document.createElement("div");
+      ttl.className = "ttl";
+      ttl.style.marginLeft = `${depth * 14}px`;
+      if (node.children.length) {
+        const tw = document.createElement("button");
+        tw.className = "twisty";
+        tw.textContent = "▶";
+        tw.title = `${node.children.length} component(s)`;
+        tw.addEventListener("click", () => {
+          ref.expanded = !ref.expanded;
+          tw.textContent = ref.expanded ? "▼" : "▶";
+          applyFilters();
+        });
+        ttl.appendChild(tw);
+      } else {
+        const sp = document.createElement("span");
+        sp.className = "twisty-spacer";
+        ttl.appendChild(sp);
       }
+      const a = document.createElement("a");
+      a.href = `https://osf.io/${encodeURIComponent(node.id)}/`;
+      a.target = "_blank"; a.rel = "noopener";
+      a.textContent = node.title;
+      ttl.appendChild(a);
+      const nid = document.createElement("span");
+      nid.className = "nid";
+      nid.textContent = node.id;
+      ttl.appendChild(nid);
+      if (node.orphanParentId) {
+        const ob = document.createElement("span");
+        ob.className = "badge orphan";
+        ob.textContent = `parent ${node.orphanParentId} not accessible`;
+        ttl.appendChild(ob);
+      }
+      if (node.hasPreprint) ttl.appendChild(makePreprintButton(node));
+      tdT.appendChild(ttl);
+
+      // status / date / components / downloaded
+      const tdS = document.createElement("td");
+      tdS.className = "col-status";
+      const sb = document.createElement("span");
+      sb.className = `badge ${node.isPublic ? "status-public" : "status-private"}`;
+      sb.textContent = node.isPublic ? "Public" : "Private";
+      tdS.appendChild(sb);
+
+      const tdD = document.createElement("td");
+      tdD.className = "col-date muted-cell";
+      tdD.textContent = formatDate(node.dateModified || node.dateCreated) || "—";
+
+      const tdN = document.createElement("td");
+      tdN.className = "col-comp muted-cell";
+      tdN.textContent = node.children.length || "";
+
+      const tdDl = document.createElement("td");
+      const mark = describeMark(downloadMarkOf(node.id));
+      tdDl.className = "col-dl " + mark.cls;
+      tdDl.textContent = mark.text;
+      ref.dlCell = tdDl;
+
+      // actions
+      const tdA = document.createElement("td");
+      tdA.className = "col-act";
+      const filesBtn = document.createElement("button");
+      filesBtn.className = "ghost small rowbtn";
+      filesBtn.textContent = "Files ▾";
+      filesBtn.addEventListener("click", () => toggleDetail(ref, filesBtn, body));
+      tdA.appendChild(filesBtn);
+
+      tr.append(tdC, tdT, tdS, tdD, tdN, tdDl, tdA);
+      body.appendChild(tr);
+      allNodeRefs.push(ref);
+      return ref;
+    }
+
+    async function toggleDetail(ref, btn, body) {
+      if (ref.detailRow) {
+        ref.detailOpen = !ref.detailOpen;
+        ref.detailRow.classList.toggle("hidden-row", !ref.detailOpen);
+        btn.textContent = ref.detailOpen ? "Files ▴" : "Files ▾";
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "Loading…";
+      try {
+        await prepareDownloads(ref.node);
+        const dr = document.createElement("tr");
+        dr.className = "detail-row";
+        const td = document.createElement("td");
+        td.colSpan = 7;
+        dr.appendChild(td);
+        ref.tr.after(dr);
+        ref.detailRow = dr;
+        ref.detailOpen = true;
+        renderDetail(ref, td);
+        btn.textContent = "Files ▴";
+      } catch (e) {
+        ref.node.loadError = e.message;
+        btn.textContent = "Retry files";
+        setStatusText(`Could not load file info for "${ref.node.title}": ${e.message}`, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function renderDetail(ref, td) {
+      const n = ref.node;
+      if (n.contributors.length) {
+        const c = document.createElement("div");
+        c.className = "hint";
+        c.textContent = "Contributors: " + n.contributors.join(", ");
+        td.appendChild(c);
+      }
+      if (n.description) {
+        const d = document.createElement("div");
+        d.className = "desc";
+        d.textContent = n.description;
+        td.appendChild(d);
+      }
+      const holder = document.createElement("div");
+      holder.className = "actions";
+      td.appendChild(holder);
+      renderDownloadOptions(n, ref.accountLabel, holder);
+    }
+
+    // --- wire controls ---
+    let t = null;
+    search.addEventListener("input", () => {
+      clearTimeout(t);
+      t = setTimeout(() => { tableFilters.text = search.value; applyFilters(); }, 150);
+    });
+    statusSel.addEventListener("change", () => { tableFilters.status = statusSel.value; applyFilters(); });
+    dlSel.addEventListener("change", () => { tableFilters.dl = dlSel.value; applyFilters(); });
+    expandBtn.addEventListener("click", () => {
+      const expandAll = expandBtn.textContent === "Expand all";
+      allNodeRefs.forEach(r => {
+        if (!r.node.children.length) return;
+        r.expanded = expandAll;
+        const tw = r.tr.querySelector(".twisty");
+        if (tw) tw.textContent = expandAll ? "▼" : "▶";
+      });
+      expandBtn.textContent = expandAll ? "Collapse all" : "Expand all";
+      applyFilters();
+    });
+    thead.querySelectorAll("th.sortable").forEach(th => {
+      th.addEventListener("click", () => {
+        const key = th.getAttribute("data-sort");
+        if (tableSort.key === key) tableSort.dir *= -1;
+        else { tableSort.key = key; tableSort.dir = 1; }
+        thead.querySelectorAll("th.sortable").forEach(o => {
+          o.textContent = o.textContent.replace(/ [▲▼]$/, "");
+        });
+        th.textContent += tableSort.dir === 1 ? " ▲" : " ▼";
+        rebuild();
+      });
+    });
+    resetBtn.addEventListener("click", () => {
+      downloadMarks = {};
+      persistDownloadMarks();
+      allNodeRefs.forEach(r => refreshDownloadCell(r.node.id));
+      applyFilters();
     });
 
-    meta.appendChild(actions);
-    row.appendChild(meta);
-    wrap.appendChild(row);
-
-    if (node.children.length) {
-      const kidsWrap = document.createElement("div");
-      kidsWrap.className = "children";
-      node.children.forEach(k => kidsWrap.appendChild(renderNode(k, accountLabel)));
-      wrap.appendChild(kidsWrap);
-    }
+    rebuild();
     return wrap;
+  }
+
+  function makePreprintButton(node) {
+    const pbtn = document.createElement("button");
+    pbtn.className = "ghost small";
+    pbtn.style.padding = "0 7px";
+    pbtn.style.fontSize = "0.68rem";
+    pbtn.textContent = "Preprint ↗";
+    pbtn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      if (node.preprintLink) { window.open(node.preprintLink, "_blank", "noopener"); return; }
+      pbtn.disabled = true;
+      pbtn.textContent = "Looking up…";
+      await resolvePreprintLink(node);
+      pbtn.disabled = false;
+      if (node.preprintLink) {
+        pbtn.textContent = "Preprint ↗";
+        window.open(node.preprintLink, "_blank", "noopener");
+      } else {
+        pbtn.textContent = node.preprintError ? "Preprint (retry)" : "No preprint link";
+      }
+    });
+    return pbtn;
   }
 
   function renderDownloadOptions(node, accountLabel, holder) {
@@ -1215,16 +1675,29 @@ Best regards,
 
     if (zippable.length) {
       zippable.forEach(p => {
-        const a = document.createElement("a");
-        a.className = "zipbtn";
-        a.href = `${FILES}/resources/${encodeURIComponent(node.id)}/providers/${encodeURIComponent(p.name)}/?zip=`;
-        a.download = `${folder} [${p.name}].zip`;
-        a.innerHTML = `${iconHtml("download")}Download ${escapeHtml(p.name)} as zip`;
-        holder.appendChild(a);
+        if (token()) {
+          // With a token we can read the bytes back (files.osf.io returns CORS
+          // headers for authenticated requests), so fetch, repair and save.
+          const btn = document.createElement("button");
+          btn.className = "zipbtn";
+          btn.innerHTML = `${iconHtml("download")}Download ${escapeHtml(p.name)} as zip`;
+          btn.addEventListener("click", () => runSingleZipDownload(node, p.name, folder, btn));
+          holder.appendChild(btn);
+        } else {
+          const a = document.createElement("a");
+          a.className = "zipbtn";
+          a.href = zipUrlFor(node.id, p.name);
+          a.download = `${folder} [${p.name}].zip`;
+          a.innerHTML = `${iconHtml("download")}Download ${escapeHtml(p.name)} as zip`;
+          a.addEventListener("click", () => markDownloaded(node.id, { state: "started" }));
+          holder.appendChild(a);
+        }
       });
       const warn = document.createElement("div");
-      warn.className = "hint";
-      warn.textContent = `Saves as "${node.id}-osfstorage-archive.zip" (OSF sets the name; use Save project list to map ids to titles). OSF also occasionally generates a corrupted zip, especially for large projects or filenames with special characters, so open the download to check it worked; if it will not open, use the individual file links below.`;
+      warn.className = token() ? "hint" : "warnline";
+      warn.textContent = token()
+        ? `Saves as "${node.id}-osfstorage-archive.zip" (OSF sets the name; use Save project list to map ids to titles). The archive is checked and repaired automatically before saving.`
+        : `OSF produces a broken zip for any project with non-ASCII characters (umlauts, accents) in a file or folder name - the download looks complete but most files cannot be extracted. Add your OSF token above to have this app download, verify and repair the archive automatically, or use the individual file links below.`;
       holder.appendChild(warn);
     } else if (!node.providers || !node.providers.length) {
       const none = document.createElement("span");
@@ -1390,11 +1863,15 @@ Best regards,
     if (btn) btn.disabled = true;
     el("findBtn").disabled = true;
 
-    let started = 0;
+    const hasToken = !!token();
+    let started = 0, repairedArchives = 0, repairedEntries = 0, alreadyValid = 0;
     const noZip = [];
     const noFiles = [];
     const failed = [];
-    const progressLabelFor = (i) => `Started ${started} download(s) · processed ${i} of ${chosen.length} selected project(s)`;
+    const dlFailed = [];
+    const progressLabelFor = (i) => hasToken
+      ? `${started} archive(s) downloaded · ${i} of ${chosen.length} selected project(s) processed`
+      : `Started ${started} download(s) · processed ${i} of ${chosen.length} selected project(s)`;
     try {
       let i = 0;
       showProgress(progressLabelFor(0), 0);
@@ -1407,15 +1884,41 @@ Best regards,
         const folder = nodeFolder(accountLabel, node);
         for (const p of node.providers) {
           if (!p.zippable) { noZip.push(`${node.title} (${p.name})`); continue; }
-          const a = document.createElement("a");
-          a.href = `${FILES}/resources/${encodeURIComponent(node.id)}/providers/${encodeURIComponent(p.name)}/?zip=`;
-          a.download = `${folder} [${p.name}].zip`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          started++;
+
+          if (hasToken) {
+            // Fetch the bytes ourselves so the archive can be verified and
+            // repaired before it reaches disk. This is the path that stops OSF's
+            // broken central directory from reaching the user in bulk.
+            try {
+              const r = await fetchRepairAndSave(node, p.name, `${folder} [${p.name}].zip`,
+                (bytes) => showProgress(`${progressLabelFor(i)} · ${escapeHtml(node.title).slice(0, 40)}: ${humanSize(bytes)}`, i / chosen.length));
+              started++;
+              if (r.repairError) {
+                dlFailed.push(`${node.title} (saved unrepaired: ${r.repairError})`);
+                markDownloaded(node.id, { state: "failed", note: r.repairError });
+              } else if (r.result.fieldsFixed) {
+                repairedArchives++; repairedEntries += r.result.fieldsFixed;
+                markDownloaded(node.id, { state: "ok", fixed: r.result.fieldsFixed, bytes: r.bytes });
+              } else {
+                alreadyValid++;
+                markDownloaded(node.id, { state: "ok", fixed: 0, bytes: r.bytes });
+              }
+            } catch (e) {
+              dlFailed.push(`${node.title} (${e.message})`);
+              markDownloaded(node.id, { state: "failed", note: e.message });
+            }
+          } else {
+            const a = document.createElement("a");
+            a.href = zipUrlFor(node.id, p.name);
+            a.download = `${folder} [${p.name}].zip`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            started++;
+            markDownloaded(node.id, { state: "started" });
+            await new Promise(r => setTimeout(r, 1200));
+          }
           showProgress(progressLabelFor(i), i / chosen.length);
-          await new Promise(r => setTimeout(r, 1200));
         }
         i++;
         showProgress(progressLabelFor(i), i / chosen.length);
@@ -1427,21 +1930,49 @@ Best regards,
       hideProgress();
     }
 
-    const parts = [`Started ${started} zip download(s) from ${chosen.length} selected item(s).`];
+    const parts = [];
+    if (hasToken) {
+      parts.push(`Downloaded ${started} archive(s) from ${chosen.length} selected item(s).`);
+      if (repairedArchives) parts.push(`Repaired ${repairedEntries} corrupted filename entr${repairedEntries === 1 ? "y" : "ies"} across ${repairedArchives} archive(s).`);
+      if (alreadyValid) parts.push(`${alreadyValid} archive(s) were already valid.`);
+    } else {
+      parts.push(`Started ${started} zip download(s) from ${chosen.length} selected item(s).`);
+      parts.push("Without a token these archives cannot be verified or repaired - OSF corrupts any zip whose filenames contain non-ASCII characters.");
+    }
     if (noZip.length) parts.push(`No zip support, use individual file links: ${summarizeList(noZip, 6)}.`);
     if (noFiles.length) parts.push(`No files found: ${summarizeList(noFiles, 6)}.`);
+    if (dlFailed.length) parts.push(`Download problems: ${summarizeList(dlFailed, 4)}.`);
     if (failed.length) {
       parts.push(`Could not load file info, try again: ${summarizeList(failed, 6)}.`);
-      if (!token()) parts.push("Bulk downloads without a token rely on a public proxy that can struggle under load; adding a token above is more reliable.");
+      if (!hasToken) parts.push("Bulk downloads without a token rely on a public proxy that can struggle under load; adding a token above is more reliable.");
     }
-    parts.push("Allow multiple downloads if your browser asks.");
+    if (!hasToken) parts.push("Allow multiple downloads if your browser asks.");
     // textContent, not innerHTML: these strings contain OSF-supplied titles.
-    setStatusText(parts.join(" "), failed.length ? "err" : "ok");
+    setStatusText(parts.join(" "), (failed.length || dlFailed.length) ? "err" : "ok");
   }
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
+
+  // The sidebar always links to these two sections, so they must exist even
+  // before a search has run - otherwise those links silently do nothing.
+  function renderPlaceholders() {
+    resultsEl.innerHTML = "";
+    [["exportSection", "Export & Downloads", "Once you have listed an account, this is where you export the project table and draft emails."],
+     ["projectsSection", "Projects", "Enter an OSF id or profile link above to list projects here. Add your token first to include your own private ones."]]
+      .forEach(([id, title, hint]) => {
+        const h = document.createElement("h2");
+        h.className = "section-heading";
+        h.id = id;
+        h.textContent = title;
+        const card = document.createElement("div");
+        card.className = "card empty";
+        card.textContent = hint;
+        resultsEl.append(h, card);
+      });
+  }
+  renderPlaceholders();
 
   // ---------- form handling ----------
   el("searchForm").addEventListener("submit", async (ev) => {
@@ -1463,6 +1994,8 @@ Best regards,
       renderTree(root);
     } catch (e) {
       setStatusText(e.message, "err");
+      // Put the section anchors back so the sidebar links still lead somewhere.
+      renderPlaceholders();
     } finally {
       el("findBtn").disabled = false;
     }

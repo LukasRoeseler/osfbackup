@@ -30,6 +30,18 @@ Last activity uses OSF's `date_modified`. A preprint link is only fetched on dem
 
 The XLSX export loads [SheetJS](https://sheetjs.com/) from a CDN on demand; the CSV export and everything else needs no external library.
 
+## OSF's broken zip export, and how this app repairs it
+
+**Every zip OSF generates for a project containing a non-ASCII character (umlaut, accent) in any file or folder name is structurally corrupt.** It downloads to completion and looks fine, but standard tools can only extract the entries before the first such name. This is a bug in OSF, not in this app — see [OSF-ZIP-BUG-REPORT.txt](OSF-ZIP-BUG-REPORT.txt) for the full write-up, including three public reproduction cases.
+
+The cause: each central-directory record declares its `filename_length` computed from the name's **UTF-8** encoding, while the name bytes are written as **CP437**. Every non-ASCII character over-declares the length by one byte, so a reader walking the central directory drifts and lands mid-signature on the next record. The compressed data and the *local* file headers are correct — only the central directory index is wrong.
+
+**With a token, this app fixes it automatically.** It downloads the archive itself (`files.osf.io` returns CORS headers for authenticated requests), rewrites each record's `filename_length` with the correct value taken from that record's local header, and saves the repaired file. No bytes move, so every stored offset and size stays valid. Verified on real affected archives up to 269 MB: after repair each one passes `unzip -t` and full per-entry CRC verification, with filenames decoding correctly.
+
+If the repair ever fails, the archive is still saved exactly as OSF sent it, with a warning — a failed repair never costs you the download.
+
+Without a token the browser cannot read the bytes back at all (OSF sends no CORS headers to unauthenticated cross-origin requests), so the plain link is offered together with a warning. Individual file downloads are never affected by this bug.
+
 ## About the access token
 
 OSF's API only sends browser CORS headers back to requests from `osf.io` itself, unless the request carries an `Authorization` header, in which case it allows any origin. Without a token, this page relays API calls through a public CORS proxy instead. A token skips the proxy entirely (talking to `api.osf.io` directly) and raises the rate limit from 100 requests/hour to 10,000/day. [Create one here](https://osf.io/settings/tokens/); read scope is enough.
@@ -43,7 +55,7 @@ Actual file *downloads* never need a token: they're generated as plain links str
 - Reads whatever the token (if any) has access to; with no token, or someone else's public account, that's public projects/components/wikis only. There's no OSF login flow beyond pasting a token, by design.
 - Without a token, requests go through a public third-party CORS proxy (`proxy.cors.sh`), which can be slower or occasionally unavailable; a token avoids this entirely.
 - Storage add-ons other than OSF Storage (linked GitHub/Dropbox/Google Drive) aren't included in the zip export; use the individual-file fallback or the OSF page link for those.
-- OSF's own zip-export endpoint can occasionally return a structurally invalid zip (confirmed independently of this app, via direct download + `unzip -t`), seemingly more often for larger projects and/or filenames with non-ASCII characters. This is a server-side limitation, not something this app can fix. Always open a downloaded zip to confirm it's intact; if it isn't, use "List individual file links" for that project/component instead.
+- Without a token the zip downloads cannot be verified or repaired (see below), so they may be corrupt. With a token they are always checked and fixed automatically.
 - The suggested `OSF-Backup/<account>/<title> (<id>)/…` filenames only apply to the small files this page generates itself (`project-list.json`, `manifest.json`, wiki `.md`). Zips and individual files come from `files.osf.io`, and browsers ignore a suggested filename for cross-origin downloads, so those land flat under OSF's own names. Use `project-list.json` to map them back.
 - Triggering many downloads in a row may hit your browser's "multiple downloads" prompt; allow it for this site if asked.
 
