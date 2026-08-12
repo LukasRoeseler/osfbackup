@@ -67,6 +67,11 @@
   .hint a{color:var(--accent);}
   .warnline{font-size:0.8rem; color:var(--warn);}
   #status{min-height:1.4em; font-size:0.92rem; margin-top:12px;}
+  .progress-wrap{margin-top:10px; display:none;}
+  .progress-wrap.active{display:block;}
+  .progress-label{font-size:0.82rem; color:var(--muted); margin-bottom:4px;}
+  .progress-track{width:100%; height:8px; border-radius:4px; background:var(--panel2); border:1px solid var(--border); overflow:hidden;}
+  .progress-fill{height:100%; width:0%; background:var(--accent2); border-radius:4px; transition:width 0.2s ease;}
   #status.info{color:var(--muted);}
   #status.err{color:var(--bad);}
   #status.ok{color:var(--good);}
@@ -148,6 +153,10 @@
       <div class="hint">Shows public projects, or your own private ones too if you paste your own token. Always open your downloads afterwards to check they worked.</div>
 
       <div id="status"></div>
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-label" id="progressLabel"></div>
+        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      </div>
     </div>
   </section>
 
@@ -230,6 +239,19 @@
     statusEl.textContent = text;
   }
   function setBusy(msg) { setStatus(`<span class="spinner"></span>${msg}`, "info"); }
+
+  const progressWrap = el("progressWrap");
+  const progressLabel = el("progressLabel");
+  const progressFill = el("progressFill");
+  function showProgress(label, fraction) {
+    progressWrap.classList.add("active");
+    progressLabel.textContent = label;
+    progressFill.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+  }
+  function hideProgress() {
+    progressWrap.classList.remove("active");
+    progressFill.style.width = "0%";
+  }
 
   // ---------- truncation bookkeeping ----------
   // Any cap we hit must be reported: silently returning a short list is the worst
@@ -1372,15 +1394,16 @@ Best regards,
     const noZip = [];
     const noFiles = [];
     const failed = [];
+    const progressLabelFor = (i) => `Started ${started} download(s) · processed ${i} of ${chosen.length} selected project(s)`;
     try {
       let i = 0;
+      showProgress(progressLabelFor(0), 0);
       for (const { node, accountLabel } of chosen) {
-        i++;
-        setBusy(`Preparing downloads (${i}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
+        setBusy(`Preparing downloads (${i + 1}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
         try {
           await prepareDownloads(node);
-        } catch (e) { failed.push(node.title); continue; }
-        if (!node.providers.length) { noFiles.push(node.title); continue; }
+        } catch (e) { failed.push(node.title); i++; showProgress(progressLabelFor(i), i / chosen.length); continue; }
+        if (!node.providers.length) { noFiles.push(node.title); i++; showProgress(progressLabelFor(i), i / chosen.length); continue; }
         const folder = nodeFolder(accountLabel, node);
         for (const p of node.providers) {
           if (!p.zippable) { noZip.push(`${node.title} (${p.name})`); continue; }
@@ -1391,13 +1414,17 @@ Best regards,
           a.click();
           a.remove();
           started++;
+          showProgress(progressLabelFor(i), i / chosen.length);
           await new Promise(r => setTimeout(r, 1200));
         }
+        i++;
+        showProgress(progressLabelFor(i), i / chosen.length);
       }
     } finally {
       downloading = false;
       if (btn) btn.disabled = false;
       el("findBtn").disabled = false;
+      hideProgress();
     }
 
     const parts = [`Started ${started} zip download(s) from ${chosen.length} selected item(s).`];
