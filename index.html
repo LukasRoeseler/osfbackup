@@ -117,7 +117,7 @@
         <input type="text" id="accountInput" placeholder="Enter OSF id or profile link" />
         <button type="submit" id="findBtn"><span class="icn" data-icon="search"></span>Find projects</button>
       </form>
-      <div class="hint">Only public projects and components are listed.</div>
+      <div class="hint">Only public projects and components are listed. Always open your downloads afterwards to check they worked.</div>
 
       <div id="status"></div>
     </div>
@@ -525,10 +525,12 @@
         a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
         a.download = `OSF-Backup/${folder} [${p.name}].zip`;
         a.innerHTML = `${iconHtml("download")}Download ${escapeHtml(p.name)} as zip`;
-        a.target = "_blank";
-        a.rel = "noopener";
         holder.appendChild(a);
       });
+      const warn = document.createElement("div");
+      warn.className = "hint";
+      warn.textContent = "OSF occasionally generates a corrupted zip, especially for large projects or filenames with special characters. Open the download to check it worked; if it won't open, use the individual file links below instead.";
+      holder.appendChild(warn);
     } else if (!node.providers || !node.providers.length) {
       const none = document.createElement("span");
       none.className = "hint";
@@ -560,8 +562,6 @@
           out.forEach(f => {
             const a = document.createElement("a");
             a.href = f.download;
-            a.target = "_blank";
-            a.rel = "noopener";
             a.download = `${folder}/${f.path}`;
             a.innerHTML = `${escapeHtml(f.path)} <span class="fpath">${humanSize(f.size)}</span>`;
             box.appendChild(a);
