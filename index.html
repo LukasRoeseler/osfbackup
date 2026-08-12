@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OSF Backupper</title>
-<meta name="description" content="List and download all public OSF projects and components for an account, structured by project.">
+<meta name="description" content="List and download all public OSF projects and components for an account.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230d78c9' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 8l-9-5-9 5 9 5 9-5z'/%3E%3Cpath d='M3 8v8l9 5 9-5V8'/%3E%3Cpath d='M12 13v8'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -54,6 +54,7 @@
   button.small{padding:6px 10px; font-size:0.85rem; font-weight:500;}
   .hint{font-size:0.8rem; color:var(--muted);}
   .hint a{color:var(--accent);}
+  .warnline{font-size:0.8rem; color:var(--warn);}
   #status{min-height:1.4em; font-size:0.92rem; margin-top:12px;}
   #status.info{color:var(--muted);}
   #status.err{color:var(--bad);}
@@ -63,7 +64,7 @@
   @keyframes spin{to{transform:rotate(360deg);}}
   #results{display:flex; flex-direction:column; gap:14px;}
   .toolbar{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;}
-  .toolbar .left{display:flex; align-items:center; gap:10px; color:var(--muted); font-size:0.9rem;}
+  .toolbar .left{display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:0.9rem;}
   .node{border:1px solid var(--border); border-radius:10px; background:var(--panel);}
   .node > .row{display:flex; align-items:flex-start; gap:10px; padding:12px 14px;}
   .node .children{padding:0 0 10px 30px; display:flex; flex-direction:column; gap:8px;}
@@ -75,6 +76,7 @@
   .node .title-line a:hover{color:var(--accent);}
   .badge{display:inline-block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.03em;
     color:var(--muted); background:var(--panel2); border:1px solid var(--border); border-radius:5px; padding:1px 6px;}
+  .badge.orphan{color:var(--warn); border-color:var(--warn); text-transform:none; letter-spacing:0;}
   .node .sub{font-size:0.82rem; color:var(--muted); margin-top:2px;}
   .node .desc{font-size:0.85rem; color:var(--muted); margin-top:6px; max-width:640px;}
   .node .actions{margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
@@ -141,6 +143,10 @@
   const DEFAULT_PROXY = "https://proxy.cors.sh/";
   const LS_KEY = "osfbackupper.token.v2";
 
+  const PAGE_CAP = 200;    // max pages to follow for one paginated collection
+  const FOLDER_CAP = 200;  // max folders to walk when listing individual files
+  const MAX_DEPTH = 12;    // max component nesting depth to follow
+
   const ICONS = {
     search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
     download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>',
@@ -164,75 +170,132 @@
   try {
     const saved = localStorage.getItem(LS_KEY);
     if (saved) el("tokenInput").value = saved;
-  } catch (e) { /* ignore corrupt storage */ }
-  el("tokenInput").addEventListener("change", () => {
+  } catch (e) { /* storage unavailable (file:// or blocked) */ }
+  function persistToken() {
     try { localStorage.setItem(LS_KEY, el("tokenInput").value.trim()); } catch (e) { /* ignore */ }
-  });
+  }
+  el("tokenInput").addEventListener("change", persistToken);
 
+  function token() { return el("tokenInput").value.trim(); }
   function authHeaders() {
-    const token = el("tokenInput").value.trim();
-    return token ? { Authorization: "Bearer " + token } : {};
+    return token() ? { Authorization: "Bearer " + token() } : {};
   }
 
   // A request carrying an Authorization header gets CORS-allowed by OSF from any origin,
   // so a token skips the proxy entirely. Without one, OSF only allows osf.io itself, so
   // anonymous requests are relayed through a public CORS proxy instead.
   function proxied(url) {
-    return el("tokenInput").value.trim() ? url : DEFAULT_PROXY + url;
+    return token() ? url : DEFAULT_PROXY + url;
   }
+  function upstreamName() { return token() ? "the OSF API" : "the CORS proxy"; }
 
   // ---------- status / progress ----------
   function setStatus(msg, kind) {
     statusEl.className = kind || "info";
     statusEl.innerHTML = msg;
   }
+  function setStatusText(text, kind) {
+    statusEl.className = kind || "info";
+    statusEl.textContent = text;
+  }
   function setBusy(msg) { setStatus(`<span class="spinner"></span>${msg}`, "info"); }
 
-  // ---------- rate-limit aware fetch ----------
+  // ---------- truncation bookkeeping ----------
+  // Any cap we hit must be reported: silently returning a short list is the worst
+  // failure mode for a backup tool, because it looks exactly like success.
+  let truncations = [];
+  function noteTruncation(msg) {
+    if (!truncations.includes(msg)) truncations.push(msg);
+  }
+
+  // ---------- fetch with retries ----------
   let callCount = 0;
-  async function apiRequest(rawUrl, attempt = 0) {
+
+  function apiError(message, status) {
+    const e = new Error(message);
+    e.status = status;
+    return e;
+  }
+
+  // Rate-limit and proxy-hiccup retries get separate budgets: sharing one counter
+  // meant a couple of proxy blips could make the next 429 give up without waiting.
+  async function requestWithRetry(rawUrl, retries) {
+    const r = retries || { rate: 0, proxy: 0, net: 0 };
     callCount++;
     let res;
     try {
       res = await fetch(proxied(rawUrl), { headers: authHeaders() });
     } catch (e) {
-      throw new Error(`Could not reach the OSF API (${e.message}).`);
+      // A rejected fetch is a network/CORS-level failure with no status. The public
+      // proxy drops requests like this fairly often under load, and it is usually
+      // fine a second later, so give it a couple of quick tries before failing.
+      if (r.net < 2) {
+        const wait = 2 * Math.pow(2, r.net); // 2s, 4s
+        setBusy(`Connection to ${upstreamName()} failed. Retrying in ${wait}s&hellip;`);
+        await new Promise(f => setTimeout(f, wait * 1000));
+        return requestWithRetry(rawUrl, { rate: r.rate, proxy: r.proxy, net: r.net + 1 });
+      }
+      throw apiError(`Could not reach ${upstreamName()} (${e.message}).`, 0);
     }
+
     if (res.status === 429) {
-      if (attempt >= 3) throw new Error("OSF API rate limit reached and retries exhausted. Wait a while and try again.");
-      const wait = 15 * Math.pow(2, attempt); // 15s, 30s, 60s
+      if (r.rate >= 3) {
+        throw apiError(`OSF API rate limit reached and retries exhausted.${token() ? "" : " Adding an access token above raises the limit from 100/hour to 10,000/day."}`, 429);
+      }
+      const wait = 15 * Math.pow(2, r.rate); // 15s, 30s, 60s
       setBusy(`Rate limited by the OSF API. Waiting ${wait}s before retrying&hellip;`);
-      await new Promise(r => setTimeout(r, wait * 1000));
-      return apiRequest(rawUrl, attempt + 1);
+      await new Promise(f => setTimeout(f, wait * 1000));
+      return requestWithRetry(rawUrl, { rate: r.rate + 1, proxy: r.proxy, net: r.net });
     }
-    // The public CORS proxy intermittently returns 401 under load even for requests
-    // that succeed moments later, so treat it as transient and retry a few times
-    // before concluding the token (if any) is actually invalid.
-    if (res.status === 401 && !el("tokenInput").value.trim() && attempt < 3) {
-      const wait = 2 * Math.pow(2, attempt); // 2s, 4s, 8s
+
+    // The public CORS proxy intermittently returns 401/403 under load even for
+    // requests that succeed moments later. With our own token there is no proxy
+    // in the path, so a 401 there is a genuinely bad token and must not retry.
+    if ((res.status === 401 || res.status === 403) && !token() && r.proxy < 3) {
+      const wait = 2 * Math.pow(2, r.proxy); // 2s, 4s, 8s
       setBusy(`CORS proxy hiccup. Retrying in ${wait}s&hellip;`);
-      await new Promise(r => setTimeout(r, wait * 1000));
-      return apiRequest(rawUrl, attempt + 1);
+      await new Promise(f => setTimeout(f, wait * 1000));
+      return requestWithRetry(rawUrl, { rate: r.rate, proxy: r.proxy + 1, net: r.net });
     }
-    let body;
-    try { body = await res.json(); } catch (e) { body = null; }
+
+    const text = await res.text();
     if (!res.ok) {
-      const detail = body && body.errors && body.errors[0] && body.errors[0].detail;
-      throw new Error(`OSF API error ${res.status}${detail ? ": " + detail : ""}.`);
+      let detail = null;
+      try {
+        const parsed = JSON.parse(text);
+        detail = parsed && parsed.errors && parsed.errors[0] && parsed.errors[0].detail;
+      } catch (e) { /* non-JSON error body */ }
+      throw apiError(`OSF API error ${res.status}${detail ? ": " + detail : ""}.`, res.status);
+    }
+    return text;
+  }
+
+  async function apiRequest(rawUrl) {
+    const text = await requestWithRetry(rawUrl);
+    let body = null;
+    try { body = JSON.parse(text); } catch (e) { /* handled below */ }
+    // A 200 that is not JSON means something in front of the API answered for it
+    // (proxy error page, captive portal). That is a failure, not empty data:
+    // returning null here used to surface as a raw TypeError further up.
+    if (!body || typeof body !== "object") {
+      // Status 200 by definition here (requestWithRetry throws on anything else),
+      // but deliberately not 404, so this never looks like "no such account".
+      throw apiError(`Unexpected non-JSON response from ${upstreamName()}.${token() ? "" : " Try again, or add an access token to skip the proxy."}`, 200);
     }
     return body;
   }
 
-  async function apiRequestAllPages(rawUrl) {
+  async function apiRequestAllPages(rawUrl, what) {
     let all = [];
     let next = rawUrl;
-    let guard = 0;
-    while (next && guard < 200) {
+    let pages = 0;
+    while (next && pages < PAGE_CAP) {
       const body = await apiRequest(next);
       all = all.concat(body.data || []);
-      next = body.links && body.links.next;
-      guard++;
+      next = (body.links && body.links.next) || null;
+      pages++;
     }
+    if (next) noteTruncation(`Stopped after ${PAGE_CAP} pages${what ? " of " + what : ""} - that list may be incomplete.`);
     return all;
   }
 
@@ -249,10 +312,39 @@
 
   // ---------- name sanitizing for downloads ----------
   function sanitizePart(s) {
-    return (s || "untitled").replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 80);
+    // Slice before trimming, so a truncated name cannot end in a space or dot
+    // (both invalid as trailing characters in Windows file names).
+    const cleaned = (s || "untitled")
+      .replace(/[\\/:*?"<>|]/g, "-")
+      .replace(/\s+/g, " ")
+      .slice(0, 80)
+      .replace(/[. ]+$/, "")
+      .trim();
+    return cleaned || "untitled";
+  }
+
+  // Folder name includes the OSF id, so two components that share a title
+  // (very common: several projects each with a "Data" component) cannot collide.
+  function nodeFolder(accountLabel, node) {
+    return `OSF-Backup/${sanitizePart(accountLabel)}/${sanitizePart(node.title)} (${node.id})`;
   }
 
   // ---------- tree building ----------
+  function relHref(d, key) {
+    try { return d.relationships[key].links.related.href || null; } catch (e) { return null; }
+  }
+
+  function parentIdOf(d) {
+    try {
+      const p = d.relationships && d.relationships.parent;
+      if (!p) return null;
+      if (p.data && p.data.id) return p.data.id;
+      const href = p.links && p.links.related && p.links.related.href;
+      if (href) return href.replace(/\/+$/, "").split("/").pop() || null;
+    } catch (e) { /* fall through */ }
+    return null;
+  }
+
   function contributorsFromEmbed(nodeJson) {
     try {
       return nodeJson.embeds.contributors.data
@@ -261,57 +353,104 @@
     } catch (e) { return []; }
   }
 
+  // Guarded: withdrawn registrations and some deleted nodes come back with a
+  // trimmed serialization, and an unguarded deref used to abort the whole crawl
+  // and discard every project mapped so far.
   function toNodeRecord(d) {
+    if (!d || !d.id) return null;
+    const attrs = d.attributes || {};
     return {
       id: d.id,
-      title: d.attributes.title || "(untitled)",
-      description: d.attributes.description || "",
-      category: d.attributes.category || "project",
-      dateCreated: d.attributes.date_created,
+      title: attrs.title || "(untitled)",
+      description: attrs.description || "",
+      category: attrs.category || "project",
+      dateCreated: attrs.date_created || null,
       contributors: contributorsFromEmbed(d),
-      childrenLink: d.relationships.children && d.relationships.children.links.related.href,
-      filesLink: d.relationships.files && d.relationships.files.links.related.href,
-      wikisLink: d.relationships.wikis && d.relationships.wikis.links.related.href,
+      childrenLink: relHref(d, "children"),
+      filesLink: relHref(d, "files"),
+      wikisLink: relHref(d, "wikis"),
+      orphanParentId: null,
       children: [],
       prepared: false,
+      loadError: null,
+      wikiError: null,
       providers: [],
       wikis: [],
     };
   }
 
-  async function fetchChildrenRecursive(node, depth) {
-    if (depth > 6 || !node.childrenLink) return;
-    const kids = await apiRequestAllPages(node.childrenLink + (node.childrenLink.includes("?") ? "&" : "?") + "embed=contributors&page[size]=100");
+  async function fetchChildrenRecursive(node, depth, visited) {
+    if (!node.childrenLink) return;
+    if (depth > MAX_DEPTH) {
+      noteTruncation(`Components nested deeper than ${MAX_DEPTH} levels were not followed (under "${node.title}").`);
+      return;
+    }
+    const sep = node.childrenLink.includes("?") ? "&" : "?";
+    let kids;
+    try {
+      kids = await apiRequestAllPages(node.childrenLink + sep + "embed=contributors&page[size]=100", "components");
+    } catch (e) {
+      // Keep the tree mapped so far instead of losing the whole run to one node.
+      noteTruncation(`Could not list components of "${node.title}": ${e.message}`);
+      return;
+    }
     for (const k of kids) {
       const rec = toNodeRecord(k);
+      if (!rec || visited.has(rec.id)) continue;
+      visited.add(rec.id);
       node.children.push(rec);
       setBusy(`Mapping project structure&hellip; (${callCount} API calls so far)`);
-      await fetchChildrenRecursive(rec, depth + 1);
+      await fetchChildrenRecursive(rec, depth + 1, visited);
     }
   }
 
   async function buildTree(accountId) {
+    truncations = [];
     setBusy(`Looking up <code>${accountId}</code>&hellip;`);
+
     let userJson = null;
     try {
       userJson = await apiRequest(`${API}/users/${accountId}/`);
     } catch (e) {
-      userJson = null;
+      // Only a genuine "no such user" may fall through to the project-id attempt.
+      // Anything else (offline, rate limited, proxy failure) has to be reported as
+      // itself - it used to surface as "not a public OSF account or project".
+      if (e.status !== 404) throw e;
     }
 
     if (userJson && userJson.data) {
       const user = userJson.data;
-      setBusy(`Found ${user.attributes.full_name || accountId}. Listing public projects&hellip;`);
-      const nodes = await apiRequestAllPages(`${API}/users/${accountId}/nodes/?embed=contributors&page[size]=100`);
-      const topLevel = nodes.filter(n => !n.relationships.parent);
+      const label = (user.attributes && user.attributes.full_name) || accountId;
+      setBusy(`Found ${escapeHtml(label)}. Listing public projects&hellip;`);
+
+      const nodes = await apiRequestAllPages(`${API}/users/${accountId}/nodes/?embed=contributors&page[size]=100`, "projects");
+      const known = new Set(nodes.map(n => n && n.id).filter(Boolean));
+
+      // Nodes without a parent are the real top level. Nodes whose parent is NOT
+      // in this list are components this account contributes to while the parent
+      // is private or has different contributors: no children link in the tree can
+      // ever reach them, so adopt them at the top level instead of dropping them.
+      const roots = [];
+      for (const n of nodes) {
+        if (!n || !n.id) continue;
+        const pid = parentIdOf(n);
+        if (!pid) roots.push({ raw: n, orphanOf: null });
+        else if (!known.has(pid)) roots.push({ raw: n, orphanOf: pid });
+      }
+
+      const visited = new Set();
       const tree = [];
-      for (const n of topLevel) {
-        const rec = toNodeRecord(n);
+      let orphanCount = 0;
+      for (const { raw, orphanOf } of roots) {
+        const rec = toNodeRecord(raw);
+        if (!rec || visited.has(rec.id)) continue;
+        visited.add(rec.id);
+        if (orphanOf) { rec.orphanParentId = orphanOf; orphanCount++; }
         tree.push(rec);
         setBusy(`Mapping project structure&hellip; (${callCount} API calls so far)`);
-        await fetchChildrenRecursive(rec, 1);
+        await fetchChildrenRecursive(rec, 1, visited);
       }
-      return { kind: "user", label: user.attributes.full_name || accountId, tree };
+      return { kind: "user", label, tree, orphanCount };
     }
 
     // fallback: treat the input as a single node/project GUID
@@ -320,56 +459,84 @@
     try {
       nodeJson = await apiRequest(`${API}/nodes/${accountId}/?embed=contributors`);
     } catch (e) {
-      throw new Error(`"${accountId}" is not a public OSF account or project, or it's private. Check the id or link.`);
+      if (e.status === 404) {
+        throw new Error(`"${accountId}" is not a public OSF account or project, or it is private. Check the id or link.`);
+      }
+      throw e;
     }
     const rec = toNodeRecord(nodeJson.data);
-    await fetchChildrenRecursive(rec, 1);
-    return { kind: "node", label: rec.title, tree: [rec] };
+    if (!rec) throw new Error(`OSF returned an unexpected response for "${accountId}".`);
+    await fetchChildrenRecursive(rec, 1, new Set([rec.id]));
+    return { kind: "node", label: rec.title, tree: [rec], orphanCount: 0 };
   }
 
   // ---------- lazy per-node download prep ----------
-  async function prepareDownloads(node, rootTitle) {
+  // Rejects when the provider listing fails, and only marks the node prepared on
+  // success, so a transient failure stays retryable instead of being cached as
+  // "this project has no files".
+  async function prepareDownloads(node) {
     if (node.prepared) return;
+
+    let providers = [];
+    if (node.filesLink) {
+      const raw = await apiRequestAllPages(node.filesLink, "storage providers");
+      providers = raw
+        .map(p => {
+          const attrs = (p && p.attributes) || {};
+          // Plain OSF Storage exposes its id as attributes.name; linked add-ons
+          // (GitHub, Dropbox, Google Drive, ...) only expose attributes.provider.
+          const name = attrs.name || attrs.provider;
+          return {
+            name,
+            // OSF's zip-export endpoint (files.osf.io/.../?zip=) only works for
+            // osfstorage; other providers 404 on it, so those fall back to
+            // individual file links instead of a "download as zip" button.
+            zippable: name === "osfstorage",
+            filesLink: relHref(p, "files"),
+          };
+        })
+        .filter(p => p.name && p.filesLink);
+    }
+
+    // Wiki pages are a bonus; a failure here must not block the file links, so it
+    // is recorded and shown rather than failing the whole node.
+    let wikis = [];
+    let wikiError = null;
+    if (node.wikisLink) {
+      try {
+        wikis = (await apiRequestAllPages(node.wikisLink, "wiki pages"))
+          .map(w => ({
+            name: (w && w.attributes && w.attributes.name) || "wiki",
+            downloadLink: (w && w.links && w.links.download) || null,
+          }))
+          .filter(w => w.downloadLink);
+      } catch (e) { wikiError = e.message; }
+    }
+
+    node.providers = providers;
+    node.wikis = wikis;
+    node.wikiError = wikiError;
+    node.loadError = null;
     node.prepared = true;
-    try {
-      if (node.filesLink) {
-        const providers = await apiRequestAllPages(node.filesLink);
-        node.providers = providers
-          .map(p => {
-            // Plain OSF Storage exposes its id as attributes.name; linked add-ons
-            // (GitHub, Dropbox, Google Drive, ...) only expose attributes.provider.
-            const name = p.attributes.name || p.attributes.provider;
-            return {
-              name,
-              // OSF's zip-export endpoint (files.osf.io/.../?zip=) only works for
-              // osfstorage; other providers 404 on it, so those fall back to
-              // individual file links instead of a "download as zip" button.
-              zippable: name === "osfstorage",
-              filesLink: p.relationships.files && p.relationships.files.links.related.href,
-            };
-          })
-          .filter(p => p.name && p.filesLink);
-      }
-    } catch (e) { node.providers = []; node.providersError = e.message; }
-    try {
-      if (node.wikisLink) {
-        const wikis = await apiRequestAllPages(node.wikisLink);
-        node.wikis = wikis.map(w => ({ name: w.attributes.name, downloadLink: w.links && w.links.download }));
-      }
-    } catch (e) { node.wikis = []; node.wikisError = e.message; }
   }
 
   async function listFilesRecursive(filesLink, pathPrefix, out, guard) {
-    guard.n = (guard.n || 0) + 1;
-    if (guard.n > 60) return; // safety cap on API calls for the fallback listing
-    const entries = await apiRequestAllPages(filesLink);
+    if (guard.n >= FOLDER_CAP) { guard.hit = true; return; }
+    guard.n++;
+    const sep = filesLink.includes("?") ? "&" : "?";
+    const entries = await apiRequestAllPages(filesLink + sep + "page[size]=100", "files");
     for (const f of entries) {
-      const name = f.attributes.name;
-      if (f.attributes.kind === "folder") {
-        const sub = f.relationships.files && f.relationships.files.links.related.href;
+      const attrs = (f && f.attributes) || {};
+      const name = attrs.name || "(unnamed)";
+      if (attrs.kind === "folder") {
+        const sub = relHref(f, "files");
         if (sub) await listFilesRecursive(sub, pathPrefix + name + "/", out, guard);
       } else {
-        out.push({ path: pathPrefix + name, download: f.links && f.links.download, size: f.attributes.size });
+        out.push({
+          path: pathPrefix + name,
+          download: (f && f.links && f.links.download) || null,
+          size: attrs.size,
+        });
       }
     }
   }
@@ -391,7 +558,16 @@
   function buildProjectIndex(nodes) {
     const out = {};
     for (const n of nodes) {
-      out[n.id] = { name: n.title, components: buildProjectIndex(n.children) };
+      out[n.id] = {
+        name: n.title,
+        osf_url: `https://osf.io/${n.id}/`,
+        // OSF names its exports itself, so record the name each zip will arrive
+        // under: that is what makes the flat pile of downloads mappable back to
+        // titles. Only meaningful when the node has OSF Storage files.
+        osfstorage_zip_filename: `${n.id}-osfstorage-archive.zip`,
+        components: buildProjectIndex(n.children),
+      };
+      if (n.orphanParentId) out[n.id].parent_not_accessible = n.orphanParentId;
     }
     return out;
   }
@@ -407,26 +583,69 @@
   }
 
   // ---------- rendering ----------
-  const allNodeRefs = []; // {node, rootTitle} for "download selected"
+  let allNodeRefs = []; // {node, accountLabel, checkbox} for "download selected"
+  let downloading = false;
+
+  function renderTruncationWarnings(container) {
+    if (!truncations.length) return;
+    const box = document.createElement("div");
+    box.className = "card";
+    const head = document.createElement("div");
+    head.className = "warnline";
+    head.textContent = "Some listings were cut short, so this may not be everything:";
+    box.appendChild(head);
+    truncations.forEach(t => {
+      const line = document.createElement("div");
+      line.className = "warnline";
+      line.textContent = "- " + t;
+      box.appendChild(line);
+    });
+    container.appendChild(box);
+  }
 
   function renderTree(root) {
     resultsEl.innerHTML = "";
-    allNodeRefs.length = 0;
+    allNodeRefs = [];
+
+    renderTruncationWarnings(resultsEl);
+
     if (!root.tree.length) {
-      resultsEl.innerHTML = `<div class="card empty">No public projects found for this account.</div>`;
+      const empty = document.createElement("div");
+      empty.className = "card empty";
+      empty.textContent = "No public projects found for this account.";
+      resultsEl.appendChild(empty);
       return;
     }
 
     const totalCount = countNodes(root.tree);
     const toolbar = document.createElement("div");
     toolbar.className = "card toolbar";
-    toolbar.innerHTML = `
-      <div class="left"><strong>${escapeHtml(root.label)}</strong> &middot; ${root.tree.length} top-level ${root.tree.length === 1 ? "project" : "projects"}, ${totalCount} total with components. Each has its own separate files; downloading a project does not include its components.</div>
-      <div>
-        <button id="selectAllBtn" class="ghost small">Select all</button>
-        <button id="saveListBtn" class="ghost small">${iconHtml("list")}Save project list</button>
-        <button id="downloadSelectedBtn" class="small">${iconHtml("download")}Download selected</button>
-      </div>`;
+
+    const left = document.createElement("div");
+    left.className = "left";
+    const line1 = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = root.label;
+    line1.appendChild(strong);
+    line1.appendChild(document.createTextNode(
+      ` · ${root.tree.length} top-level ${root.tree.length === 1 ? "project" : "projects"}, ${totalCount} total with components.` +
+      " Each has its own separate files; downloading a project does not include its components."
+    ));
+    left.appendChild(line1);
+    if (root.orphanCount) {
+      const line2 = document.createElement("div");
+      line2.className = "warnline";
+      line2.textContent = `${root.orphanCount} of these are components whose parent project is not public or has different contributors, so they are listed at the top level.`;
+      left.appendChild(line2);
+    }
+    toolbar.appendChild(left);
+
+    const btns = document.createElement("div");
+    btns.innerHTML = `
+      <button id="selectAllBtn" class="ghost small">Select all</button>
+      <button id="saveListBtn" class="ghost small">${iconHtml("list")}Save project list</button>
+      <button id="downloadSelectedBtn" class="small">${iconHtml("download")}Download selected</button>`;
+    toolbar.appendChild(btns);
     resultsEl.appendChild(toolbar);
 
     const list = document.createElement("div");
@@ -440,17 +659,20 @@
       resultsEl.querySelectorAll('input[type=checkbox][data-select]').forEach(cb => cb.checked = true);
     });
     el("saveListBtn").addEventListener("click", () => {
-      const projects = buildProjectIndex(root.tree);
       downloadBlob(
         `OSF-Backup/${sanitizePart(root.label)}/project-list.json`,
-        JSON.stringify({ account: root.label, projects }, null, 2),
+        JSON.stringify({
+          account: root.label,
+          note: "Zip downloads arrive under the name OSF gives them (<osf-id>-<provider>-archive.zip). Match them back to titles using the id keys below.",
+          projects: buildProjectIndex(root.tree),
+        }, null, 2),
         "application/json"
       );
     });
     el("downloadSelectedBtn").addEventListener("click", downloadSelected);
   }
 
-  function renderNode(node, rootTitle) {
+  function renderNode(node, accountLabel) {
     const wrap = document.createElement("div");
     wrap.className = "node";
 
@@ -461,17 +683,20 @@
     cb.type = "checkbox";
     cb.setAttribute("data-select", "1");
     row.appendChild(cb);
-    allNodeRefs.push({ node, rootTitle, checkbox: cb });
+    allNodeRefs.push({ node, accountLabel, checkbox: cb });
 
     const meta = document.createElement("div");
     meta.className = "meta";
     const contrib = node.contributors.length ? node.contributors.join(", ") : "";
+    const year = node.dateCreated ? new Date(node.dateCreated).getFullYear() : null;
+    const yearText = Number.isFinite(year) ? String(year) : "";
     meta.innerHTML = `
       <div class="title-line">
-        <a href="https://osf.io/${node.id}/" target="_blank" rel="noopener">${escapeHtml(node.title)}</a>
+        <a href="https://osf.io/${encodeURIComponent(node.id)}/" target="_blank" rel="noopener">${escapeHtml(node.title)}</a>
         <span class="badge">${escapeHtml(node.category)}</span>
+        ${node.orphanParentId ? `<span class="badge orphan">component of ${escapeHtml(node.orphanParentId)} (parent not accessible)</span>` : ""}
       </div>
-      <div class="sub">${contrib ? escapeHtml(contrib) : ""}${node.dateCreated ? (contrib ? " &middot; " : "") + new Date(node.dateCreated).getFullYear() : ""}</div>
+      <div class="sub">${contrib ? escapeHtml(contrib) : ""}${yearText ? (contrib ? " &middot; " : "") + yearText : ""}</div>
       ${node.description ? `<div class="desc">${escapeHtml(node.description)}</div>` : ""}
     `;
 
@@ -488,13 +713,20 @@
       prepBtn.disabled = true;
       prepBtn.innerHTML = "Loading&hellip;";
       try {
-        await prepareDownloads(node, rootTitle);
-        renderDownloadOptions(node, rootTitle, actionsHolder);
+        await prepareDownloads(node);
+        renderDownloadOptions(node, accountLabel, actionsHolder);
         prepBtn.remove();
       } catch (e) {
+        // Distinct from "no files": this node's file list could not be loaded and
+        // the button stays available so the user can actually retry.
+        node.loadError = e.message;
         prepBtn.disabled = false;
-        prepBtn.innerHTML = `${iconHtml("folder")}Get download links`;
-        setStatus("Error preparing downloads: " + escapeHtml(e.message), "err");
+        prepBtn.innerHTML = `${iconHtml("folder")}Could not load file info - retry`;
+        actionsHolder.innerHTML = "";
+        const err = document.createElement("div");
+        err.className = "warnline";
+        err.textContent = e.message;
+        actionsHolder.appendChild(err);
       }
     });
 
@@ -505,15 +737,15 @@
     if (node.children.length) {
       const kidsWrap = document.createElement("div");
       kidsWrap.className = "children";
-      node.children.forEach(k => kidsWrap.appendChild(renderNode(k, rootTitle)));
+      node.children.forEach(k => kidsWrap.appendChild(renderNode(k, accountLabel)));
       wrap.appendChild(kidsWrap);
     }
     return wrap;
   }
 
-  function renderDownloadOptions(node, rootTitle, holder) {
+  function renderDownloadOptions(node, accountLabel, holder) {
     holder.innerHTML = "";
-    const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
+    const folder = nodeFolder(accountLabel, node);
 
     const zippable = (node.providers || []).filter(p => p.zippable);
     const other = (node.providers || []).filter(p => !p.zippable);
@@ -522,14 +754,14 @@
       zippable.forEach(p => {
         const a = document.createElement("a");
         a.className = "zipbtn";
-        a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
-        a.download = `OSF-Backup/${folder} [${p.name}].zip`;
+        a.href = `${FILES}/resources/${encodeURIComponent(node.id)}/providers/${encodeURIComponent(p.name)}/?zip=`;
+        a.download = `${folder} [${p.name}].zip`;
         a.innerHTML = `${iconHtml("download")}Download ${escapeHtml(p.name)} as zip`;
         holder.appendChild(a);
       });
       const warn = document.createElement("div");
       warn.className = "hint";
-      warn.textContent = "OSF occasionally generates a corrupted zip, especially for large projects or filenames with special characters. Open the download to check it worked; if it won't open, use the individual file links below instead.";
+      warn.textContent = `Saves as "${node.id}-osfstorage-archive.zip" (OSF sets the name; use Save project list to map ids to titles). OSF also occasionally generates a corrupted zip, especially for large projects or filenames with special characters, so open the download to check it worked; if it will not open, use the individual file links below.`;
       holder.appendChild(warn);
     } else if (!node.providers || !node.providers.length) {
       const none = document.createElement("span");
@@ -541,40 +773,90 @@
     if (other.length) {
       const note = document.createElement("div");
       note.className = "hint";
-      note.textContent = `${other.map(p => p.name).join(", ")} ${other.length === 1 ? "doesn't" : "don't"} support zip downloads; use the individual file links below.`;
+      note.textContent = `${other.map(p => p.name).join(", ")} ${other.length === 1 ? "does not" : "do not"} support zip downloads; use the individual file links below.`;
       holder.appendChild(note);
     }
 
-    const fallbackBtn = document.createElement("button");
-    fallbackBtn.className = "ghost small";
-    fallbackBtn.innerHTML = `${iconHtml("list")}List individual file links`;
-    holder.appendChild(fallbackBtn);
-    fallbackBtn.addEventListener("click", async () => {
-      fallbackBtn.disabled = true;
-      fallbackBtn.innerHTML = "Listing files&hellip;";
+    if (node.wikiError) {
+      const we = document.createElement("div");
+      we.className = "warnline";
+      we.textContent = `Wiki pages could not be listed: ${node.wikiError}`;
+      holder.appendChild(we);
+    }
+
+    if (node.providers && node.providers.length) {
+      const fallbackBtn = document.createElement("button");
+      fallbackBtn.className = "ghost small";
+      fallbackBtn.innerHTML = `${iconHtml("list")}List individual file links`;
+      holder.appendChild(fallbackBtn);
+
+      // One box reused across retries, so a retry cannot stack stale boxes.
       const box = document.createElement("div");
       box.className = "filelist";
+      box.style.display = "none";
       holder.appendChild(box);
-      try {
+
+      fallbackBtn.addEventListener("click", async () => {
+        fallbackBtn.disabled = true;
+        fallbackBtn.innerHTML = "Listing files&hellip;";
+        box.style.display = "";
+        box.innerHTML = "";
+        let anyError = null;
+        let truncated = false;
+        let total = 0;
         for (const p of node.providers) {
           const out = [];
-          await listFilesRecursive(p.filesLink, "", out, {});
+          const guard = { n: 0, hit: false };
+          try {
+            await listFilesRecursive(p.filesLink, "", out, guard);
+          } catch (e) {
+            anyError = e.message;
+          }
+          if (guard.hit) truncated = true;
+          // Keep whatever was collected before an error instead of discarding it.
           out.forEach(f => {
-            const a = document.createElement("a");
-            a.href = f.download;
-            a.download = `${folder}/${f.path}`;
-            a.innerHTML = `${escapeHtml(f.path)} <span class="fpath">${humanSize(f.size)}</span>`;
-            box.appendChild(a);
+            total++;
+            if (f.download) {
+              const a = document.createElement("a");
+              a.href = f.download;
+              a.download = `${folder}/${f.path}`;
+              a.innerHTML = `${escapeHtml(f.path)} <span class="fpath">${humanSize(f.size)}</span>`;
+              box.appendChild(a);
+            } else {
+              // No download link: render as text so a click cannot navigate the
+              // page away and destroy the mapped tree.
+              const s = document.createElement("div");
+              s.className = "fpath";
+              s.textContent = `${f.path} (no download link)`;
+              box.appendChild(s);
+            }
           });
-          if (!out.length) box.innerHTML += `<div class="hint">No files under ${escapeHtml(p.name)}.</div>`;
+          if (!out.length && !anyError) {
+            const empty = document.createElement("div");
+            empty.className = "hint";
+            empty.textContent = `No files under ${p.name}.`;
+            box.appendChild(empty);
+          }
         }
-        fallbackBtn.remove();
-      } catch (e) {
-        box.innerHTML = `<div class="hint">Could not list files: ${escapeHtml(e.message)}</div>`;
-        fallbackBtn.disabled = false;
-        fallbackBtn.innerHTML = `${iconHtml("list")}Retry listing individual files`;
-      }
-    });
+        if (truncated) {
+          const t = document.createElement("div");
+          t.className = "warnline";
+          t.textContent = `Stopped after ${FOLDER_CAP} folders, so this list is incomplete. Open the project on OSF to see the rest.`;
+          box.appendChild(t);
+        }
+        if (anyError) {
+          const e2 = document.createElement("div");
+          e2.className = "warnline";
+          e2.textContent = `Listing stopped early: ${anyError}`;
+          box.appendChild(e2);
+          fallbackBtn.disabled = false;
+          fallbackBtn.innerHTML = `${iconHtml("list")}Retry listing individual files`;
+        } else {
+          fallbackBtn.innerHTML = `${iconHtml("list")}${total} file link(s) listed`;
+          fallbackBtn.disabled = true;
+        }
+      });
+    }
 
     if (node.wikis && node.wikis.length) {
       const wikiWrap = document.createElement("div");
@@ -582,18 +864,23 @@
       node.wikis.forEach(w => {
         const btn = document.createElement("button");
         btn.className = "ghost small";
-        btn.innerHTML = `${iconHtml("document")}${escapeHtml(w.name)}.md`;
+        const label = `${iconHtml("document")}${escapeHtml(w.name)}.md`;
+        btn.innerHTML = label;
         btn.addEventListener("click", async () => {
           btn.disabled = true;
           btn.innerHTML = "Fetching&hellip;";
           try {
-            const res = await fetch(proxied(w.downloadLink), { headers: authHeaders() });
-            const text = await res.text();
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            // Routed through the shared retry path so rate limits and proxy
+            // hiccups behave the same here as everywhere else.
+            const text = await requestWithRetry(w.downloadLink);
+            if (/^\s*<!doctype html/i.test(text)) {
+              throw new Error("got an HTML page instead of wiki text");
+            }
             downloadBlob(`${folder}/wiki/${sanitizePart(w.name)}.md`, text, "text/markdown");
-            btn.innerHTML = `${iconHtml("document")}${escapeHtml(w.name)}.md (done)`;
+            btn.innerHTML = label + " (done)";
           } catch (e) {
-            btn.innerHTML = `${iconHtml("document")}${escapeHtml(w.name)}.md (failed, click to retry)`;
+            btn.innerHTML = label + " (failed, click to retry)";
+            btn.title = e.message;
           }
           btn.disabled = false;
         });
@@ -607,15 +894,19 @@
     manifestBtn.innerHTML = `${iconHtml("info")}Download info (manifest.json)`;
     manifestBtn.addEventListener("click", () => {
       const manifest = {
+        id: node.id,
         title: node.title,
         osf_url: `https://osf.io/${node.id}/`,
         category: node.category,
         description: node.description,
         contributors: node.contributors,
         date_created: node.dateCreated,
-        wikis: node.wikis.map(w => w.name),
-        components: node.children.map(c => c.title),
+        storage_providers: (node.providers || []).map(p => p.name),
+        osfstorage_zip_filename: `${node.id}-osfstorage-archive.zip`,
+        wikis: (node.wikis || []).map(w => w.name),
+        components: node.children.map(c => ({ id: c.id, title: c.title })),
       };
+      if (node.orphanParentId) manifest.parent_not_accessible = node.orphanParentId;
       downloadBlob(`${folder}/manifest.json`, JSON.stringify(manifest, null, 2), "application/json");
     });
     holder.appendChild(manifestBtn);
@@ -627,43 +918,57 @@
   }
 
   async function downloadSelected() {
+    if (downloading) return;
     const chosen = allNodeRefs.filter(r => r.checkbox.checked);
-    if (!chosen.length) { setStatus("Nothing selected.", "err"); return; }
-    setBusy(`Preparing ${chosen.length} selected item(s)&hellip;`);
-    let i = 0;
+    if (!chosen.length) { setStatusText("Nothing selected.", "err"); return; }
+
+    downloading = true;
+    const btn = el("downloadSelectedBtn");
+    if (btn) btn.disabled = true;
+    el("findBtn").disabled = true;
+
     let started = 0;
     const noZip = [];
     const noFiles = [];
     const failed = [];
-    for (const { node, rootTitle } of chosen) {
-      i++;
-      setBusy(`Preparing downloads (${i}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
-      try {
-        await prepareDownloads(node, rootTitle);
-      } catch (e) { failed.push(node.title); continue; }
-      if (!node.providers || !node.providers.length) { noFiles.push(node.title); continue; }
-      const folder = sanitizePart(rootTitle) + "/" + sanitizePart(node.title);
-      for (const p of node.providers) {
-        if (!p.zippable) { noZip.push(`${node.title} (${p.name})`); continue; }
-        const a = document.createElement("a");
-        a.href = `${FILES}/resources/${node.id}/providers/${encodeURIComponent(p.name)}/?zip=`;
-        a.download = `OSF-Backup/${folder} [${p.name}].zip`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        started++;
-        await new Promise(r => setTimeout(r, 1200));
+    try {
+      let i = 0;
+      for (const { node, accountLabel } of chosen) {
+        i++;
+        setBusy(`Preparing downloads (${i}/${chosen.length}): ${escapeHtml(node.title)}&hellip;`);
+        try {
+          await prepareDownloads(node);
+        } catch (e) { failed.push(node.title); continue; }
+        if (!node.providers.length) { noFiles.push(node.title); continue; }
+        const folder = nodeFolder(accountLabel, node);
+        for (const p of node.providers) {
+          if (!p.zippable) { noZip.push(`${node.title} (${p.name})`); continue; }
+          const a = document.createElement("a");
+          a.href = `${FILES}/resources/${encodeURIComponent(node.id)}/providers/${encodeURIComponent(p.name)}/?zip=`;
+          a.download = `${folder} [${p.name}].zip`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          started++;
+          await new Promise(r => setTimeout(r, 1200));
+        }
       }
+    } finally {
+      downloading = false;
+      if (btn) btn.disabled = false;
+      el("findBtn").disabled = false;
     }
+
     const parts = [`Started ${started} zip download(s) from ${chosen.length} selected item(s).`];
     if (noZip.length) parts.push(`No zip support, use individual file links: ${summarizeList(noZip, 6)}.`);
     if (noFiles.length) parts.push(`No files found: ${summarizeList(noFiles, 6)}.`);
     if (failed.length) {
       parts.push(`Could not load file info, try again: ${summarizeList(failed, 6)}.`);
-      if (!el("tokenInput").value.trim()) parts.push("Bulk downloads without a token rely on a public proxy that can struggle under load; adding a token above is more reliable.");
+      if (!token()) parts.push("Bulk downloads without a token rely on a public proxy that can struggle under load; adding a token above is more reliable.");
     }
     parts.push("Allow multiple downloads if your browser asks.");
-    setStatus(parts.join(" "), failed.length ? "err" : "ok");
+    // textContent, not innerHTML: these strings contain OSF-supplied titles.
+    setStatusText(parts.join(" "), failed.length ? "err" : "ok");
   }
 
   function escapeHtml(s) {
@@ -673,21 +978,23 @@
   // ---------- form handling ----------
   el("searchForm").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const raw = el("accountInput").value;
-    const accountId = parseAccountInput(raw);
+    if (downloading) return;
+    persistToken();
+    const accountId = parseAccountInput(el("accountInput").value);
     if (!accountId) {
       setStatus("Could not parse that as an OSF id or link. Try a bare id like <code>tqx69</code>, or a full profile link.", "err");
       return;
     }
     el("findBtn").disabled = true;
     resultsEl.innerHTML = "";
+    allNodeRefs = [];
     callCount = 0;
     try {
       const root = await buildTree(accountId);
-      setStatus(`Done. ${callCount} OSF API calls used this run.`, "ok");
+      setStatusText(`Done. ${callCount} OSF API calls used this run.`, "ok");
       renderTree(root);
     } catch (e) {
-      setStatus(escapeHtml(e.message), "err");
+      setStatusText(e.message, "err");
     } finally {
       el("findBtn").disabled = false;
     }
