@@ -17,6 +17,17 @@ You can also select multiple projects/components with the checkboxes and use "Do
 
 `/users/<id>/nodes/` only returns nodes you are a contributor on. If you contribute to a component but not to its parent project (or the parent is private), nothing in the tree can reach that component through a parent, so it is listed at the top level with a "parent not accessible" marker instead of being dropped. On the author's own account this recovers 9 components that would otherwise be invisible.
 
+### Private projects, and the export/email tools
+
+Paste **your own** OSF token for **your own** account and you'll see your private projects too, each marked with a Public/Private badge — this isn't a special mode, it's just how OSF's permissions already work (a token authenticates as you, so you see whatever you have access to; without one, or with someone else's public account, you only ever see public content).
+
+A "Export table / draft emails" section appears below the project tree once you have results. It's mainly useful once you have private projects to manage:
+
+- **Download table (CSV / XLSX)** — one row per top-level project: id, name, status, admin(s), link, component count, and a note on any component whose visibility differs from its project (components have an independent public/private flag on OSF, so switching a project doesn't cascade to its components).
+- **Draft emails** — an editable template with `[ADMIN]`, `[NAME]`, `[LINK]`, `[ID]` placeholders. Select projects with the checkboxes (there's a "Select all private" shortcut), click Generate, and get one filled-in draft per selected project — skipping any that are already public — as plain text, ready to copy or download.
+
+The XLSX export loads [SheetJS](https://sheetjs.com/) from a CDN on demand; the CSV export and everything else needs no external library.
+
 ## About the access token
 
 OSF's API only sends browser CORS headers back to requests from `osf.io` itself, unless the request carries an `Authorization` header, in which case it allows any origin. Without a token, this page relays API calls through a public CORS proxy instead. A token skips the proxy entirely (talking to `api.osf.io` directly) and raises the rate limit from 100 requests/hour to 10,000/day. [Create one here](https://osf.io/settings/tokens/); read scope is enough.
@@ -27,7 +38,7 @@ Actual file *downloads* never need a token: they're generated as plain links str
 
 ## Limitations
 
-- Only reads **public** projects/components/wikis; there's no OSF login flow beyond the optional token, by design.
+- Reads whatever the token (if any) has access to; with no token, or someone else's public account, that's public projects/components/wikis only. There's no OSF login flow beyond pasting a token, by design.
 - Without a token, requests go through a public third-party CORS proxy (`proxy.cors.sh`), which can be slower or occasionally unavailable; a token avoids this entirely.
 - Storage add-ons other than OSF Storage (linked GitHub/Dropbox/Google Drive) aren't included in the zip export; use the individual-file fallback or the OSF page link for those.
 - OSF's own zip-export endpoint can occasionally return a structurally invalid zip (confirmed independently of this app, via direct download + `unzip -t`), seemingly more often for larger projects and/or filenames with non-ASCII characters. This is a server-side limitation, not something this app can fix. Always open a downloaded zip to confirm it's intact; if it isn't, use "List individual file links" for that project/component instead.

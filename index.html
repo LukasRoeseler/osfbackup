@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OSF Backupper</title>
-<meta name="description" content="List and download all public OSF projects and components for an account.">
+<meta name="description" content="List and download OSF projects and components for an account, public by default or your own private ones with a token.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230d78c9' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 8l-9-5-9 5 9 5 9-5z'/%3E%3Cpath d='M3 8v8l9 5 9-5V8'/%3E%3Cpath d='M12 13v8'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -77,6 +77,15 @@
   .badge{display:inline-block; font-size:0.7rem; text-transform:uppercase; letter-spacing:.03em;
     color:var(--muted); background:var(--panel2); border:1px solid var(--border); border-radius:5px; padding:1px 6px;}
   .badge.orphan{color:var(--warn); border-color:var(--warn); text-transform:none; letter-spacing:0;}
+  .badge.status-public{color:var(--good); border-color:var(--good);}
+  .badge.status-private{color:var(--warn); border-color:var(--warn);}
+  textarea{
+    width:100%; min-height:120px; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:10px 12px; font-size:0.88rem; font-family:var(--mono); resize:vertical;
+  }
+  .export-panel{display:flex; flex-direction:column; gap:14px;}
+  .export-panel h3{margin:0; font-size:1rem;}
+  .export-panel .row{display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
   .node .sub{font-size:0.82rem; color:var(--muted); margin-top:2px;}
   .node .desc{font-size:0.85rem; color:var(--muted); margin-top:6px; max-width:640px;}
   .node .actions{margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;}
@@ -119,7 +128,7 @@
         <input type="text" id="accountInput" placeholder="Enter OSF id or profile link" />
         <button type="submit" id="findBtn"><span class="icn" data-icon="search"></span>Find projects</button>
       </form>
-      <div class="hint">Only public projects and components are listed. Always open your downloads afterwards to check they worked.</div>
+      <div class="hint">Shows public projects, or your own private ones too if you paste your own token. Always open your downloads afterwards to check they worked.</div>
 
       <div id="status"></div>
     </div>
@@ -134,6 +143,7 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 (() => {
   "use strict";
@@ -353,6 +363,18 @@
     } catch (e) { return []; }
   }
 
+  // Same contributors embed already carries each person's permission level
+  // (only visible to someone with access to the node), so admins are free
+  // to pull out alongside the general contributor list, no extra request.
+  function adminsFromEmbed(nodeJson) {
+    try {
+      return nodeJson.embeds.contributors.data
+        .filter(c => c.attributes && c.attributes.permission === "admin")
+        .map(c => c.embeds && c.embeds.users && c.embeds.users.data && c.embeds.users.data.attributes && c.embeds.users.data.attributes.full_name)
+        .filter(Boolean);
+    } catch (e) { return []; }
+  }
+
   // Guarded: withdrawn registrations and some deleted nodes come back with a
   // trimmed serialization, and an unguarded deref used to abort the whole crawl
   // and discard every project mapped so far.
@@ -365,7 +387,9 @@
       description: attrs.description || "",
       category: attrs.category || "project",
       dateCreated: attrs.date_created || null,
+      isPublic: !!attrs.public,
       contributors: contributorsFromEmbed(d),
+      admins: adminsFromEmbed(d),
       childrenLink: relHref(d, "children"),
       filesLink: relHref(d, "files"),
       wikisLink: relHref(d, "wikis"),
@@ -421,7 +445,7 @@
     if (userJson && userJson.data) {
       const user = userJson.data;
       const label = (user.attributes && user.attributes.full_name) || accountId;
-      setBusy(`Found ${escapeHtml(label)}. Listing public projects&hellip;`);
+      setBusy(`Found ${escapeHtml(label)}. Listing projects&hellip;`);
 
       const nodes = await apiRequestAllPages(`${API}/users/${accountId}/nodes/?embed=contributors&page[size]=100`, "projects");
       const known = new Set(nodes.map(n => n && n.id).filter(Boolean));
@@ -572,6 +596,116 @@
     return out;
   }
 
+  // ---------- table export (CSV / XLSX) ----------
+  // One row per top-level project; components have their own independent
+  // visibility on OSF, so a status mismatch anywhere under a project is
+  // surfaced as a note rather than exploding into its own row.
+  function collectStatusMismatches(node, parentStatus, out) {
+    for (const c of node.children || []) {
+      if (c.isPublic !== parentStatus) {
+        out.push(`${c.title} (${c.id}): ${c.isPublic ? "public" : "private"}`);
+      }
+      collectStatusMismatches(c, parentStatus, out);
+    }
+  }
+
+  function flattenForTable(tree) {
+    return tree.map(p => {
+      const mismatches = [];
+      collectStatusMismatches(p, p.isPublic, mismatches);
+      return {
+        id: p.id,
+        title: p.title,
+        status: p.isPublic ? "Public" : "Private",
+        admins: (p.admins || []).join("; "),
+        link: `https://osf.io/${p.id}/`,
+        componentCount: p.children.length,
+        mismatches: mismatches.join("; "),
+      };
+    });
+  }
+
+  const TABLE_HEADERS = ["OSF ID", "Project Name", "Status", "Admin(s)", "Link", "Component Count", "Components With Different Status"];
+  function rowToArray(r) {
+    return [r.id, r.title, r.status, r.admins, r.link, r.componentCount, r.mismatches];
+  }
+
+  function toCsv(rows) {
+    const esc = v => {
+      const s = String(v == null ? "" : v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [TABLE_HEADERS.map(esc).join(",")];
+    rows.forEach(r => lines.push(rowToArray(r).map(esc).join(",")));
+    return "﻿" + lines.join("\r\n");
+  }
+
+  function downloadXlsx(rows, accountLabel) {
+    if (typeof XLSX === "undefined") {
+      setStatusText("Could not load the xlsx library (offline?). Use Download CSV instead.", "err");
+      return;
+    }
+    const aoa = [TABLE_HEADERS, ...rows.map(rowToArray)];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 10 }, { wch: 46 }, { wch: 10 }, { wch: 30 }, { wch: 32 }, { wch: 8 }, { wch: 50 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Projects");
+
+    const summary = [
+      ["Account", accountLabel],
+      ["Top-level projects", rows.length],
+      ["Public", rows.filter(r => r.status === "Public").length],
+      ["Private", rows.filter(r => r.status === "Private").length],
+      ["Projects with a status-mismatched component", rows.filter(r => r.mismatches).length],
+    ];
+    const sws = XLSX.utils.aoa_to_sheet(summary);
+    sws["!cols"] = [{ wch: 40 }, { wch: 40 }];
+    XLSX.utils.book_append_sheet(wb, sws, "Summary");
+
+    XLSX.writeFile(wb, `OSF-Backup ${sanitizePart(accountLabel)} projects.xlsx`);
+  }
+
+  // ---------- email draft generation ----------
+  const DEFAULT_EMAIL_TEMPLATE =
+`Subject: Please review the visibility of "[NAME]"
+
+Dear [ADMIN],
+
+I'm reviewing the OSF projects our group is involved in and wanted to check in about
+this one:
+
+Project: [NAME]
+Link: [LINK]
+
+Could you let me know whether this should stay private, or whether it's ready to be
+made public? A few things worth checking first:
+
+* We have the rights to publish all files in the project.
+* The data it contains (e.g. research data) does not include identifying information
+  (e.g. names, email addresses, IP addresses).
+* If the project has sub-components, they have their own independent visibility
+  setting on OSF and may need to be switched separately.
+
+Let me know if I can help with any of this.
+
+Best regards,
+[YOUR_NAME]`;
+
+  function joinNames(names) {
+    if (!names.length) return "project admin";
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return `${names[0]} and ${names[1]}`;
+    return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+  }
+
+  function fillTemplate(tmpl, node) {
+    return tmpl
+      .split("[ADMIN]").join(joinNames(node.admins || []))
+      .split("[NAME]").join(node.title)
+      .split("[LINK]").join(`https://osf.io/${node.id}/`)
+      .split("[ID]").join(node.id);
+  }
+
   function downloadBlob(filename, text, type) {
     const blob = new Blob([text], { type: type || "text/plain" });
     const a = document.createElement("a");
@@ -612,7 +746,7 @@
     if (!root.tree.length) {
       const empty = document.createElement("div");
       empty.className = "card empty";
-      empty.textContent = "No public projects found for this account.";
+      empty.textContent = "No projects found for this account (or none visible without a token).";
       resultsEl.appendChild(empty);
       return;
     }
@@ -655,6 +789,8 @@
     root.tree.forEach(node => list.appendChild(renderNode(node, root.label)));
     resultsEl.appendChild(list);
 
+    resultsEl.appendChild(renderExportPanel(root));
+
     el("selectAllBtn").addEventListener("click", () => {
       resultsEl.querySelectorAll('input[type=checkbox][data-select]').forEach(cb => cb.checked = true);
     });
@@ -670,6 +806,131 @@
       );
     });
     el("downloadSelectedBtn").addEventListener("click", downloadSelected);
+  }
+
+  // A separate section below the tree, not part of the main flow: most visitors
+  // are just backing up someone else's public account and never need this, so it
+  // only has to be discoverable, not front-and-center.
+  function renderExportPanel(root) {
+    const card = document.createElement("div");
+    card.className = "card export-panel";
+
+    const heading = document.createElement("h3");
+    heading.textContent = "Export table / draft emails";
+    card.appendChild(heading);
+
+    const tableHint = document.createElement("div");
+    tableHint.className = "hint";
+    tableHint.textContent = "A flat table of every top-level project: id, name, status, admin(s), link, and a note on any component whose visibility differs from its project. Private projects only show up here if the token above belongs to an account that can see them.";
+    card.appendChild(tableHint);
+
+    const tableRow = document.createElement("div");
+    tableRow.className = "row";
+    const csvBtn = document.createElement("button");
+    csvBtn.className = "ghost small";
+    csvBtn.innerHTML = `${iconHtml("list")}Download table (CSV)`;
+    const xlsxBtn = document.createElement("button");
+    xlsxBtn.className = "ghost small";
+    xlsxBtn.innerHTML = `${iconHtml("list")}Download table (XLSX)`;
+    tableRow.appendChild(csvBtn);
+    tableRow.appendChild(xlsxBtn);
+    card.appendChild(tableRow);
+
+    csvBtn.addEventListener("click", () => {
+      const rows = flattenForTable(root.tree);
+      downloadBlob(`OSF-Backup/${sanitizePart(root.label)}/projects.csv`, toCsv(rows), "text/csv;charset=utf-8");
+    });
+    xlsxBtn.addEventListener("click", () => {
+      downloadXlsx(flattenForTable(root.tree), root.label);
+    });
+
+    const emailHint = document.createElement("div");
+    emailHint.className = "hint";
+    emailHint.innerHTML = `Edit the template below, then select the projects to draft for (checkboxes above) and click Generate. Placeholders <code>[ADMIN]</code>, <code>[NAME]</code>, <code>[LINK]</code>, and <code>[ID]</code> are filled in per project.`;
+    card.appendChild(emailHint);
+
+    const templateArea = document.createElement("textarea");
+    templateArea.id = "emailTemplate";
+    templateArea.value = DEFAULT_EMAIL_TEMPLATE;
+    card.appendChild(templateArea);
+
+    const emailRow = document.createElement("div");
+    emailRow.className = "row";
+    const selectPrivateBtn = document.createElement("button");
+    selectPrivateBtn.className = "ghost small";
+    selectPrivateBtn.textContent = "Select all private";
+    const clearBtn = document.createElement("button");
+    clearBtn.className = "ghost small";
+    clearBtn.textContent = "Clear selection";
+    const genBtn = document.createElement("button");
+    genBtn.className = "small";
+    genBtn.innerHTML = `${iconHtml("document")}Generate email drafts`;
+    emailRow.appendChild(selectPrivateBtn);
+    emailRow.appendChild(clearBtn);
+    emailRow.appendChild(genBtn);
+    card.appendChild(emailRow);
+
+    const emailStatus = document.createElement("div");
+    emailStatus.className = "hint";
+    card.appendChild(emailStatus);
+
+    const outputArea = document.createElement("textarea");
+    outputArea.id = "emailOutput";
+    outputArea.readOnly = true;
+    outputArea.style.display = "none";
+    outputArea.style.minHeight = "220px";
+    card.appendChild(outputArea);
+
+    const downloadTxtBtn = document.createElement("button");
+    downloadTxtBtn.className = "ghost small";
+    downloadTxtBtn.innerHTML = `${iconHtml("download")}Download drafts as .txt`;
+    downloadTxtBtn.style.display = "none";
+    card.appendChild(downloadTxtBtn);
+
+    selectPrivateBtn.addEventListener("click", () => {
+      allNodeRefs.forEach(r => { r.checkbox.checked = !r.node.isPublic; });
+    });
+    clearBtn.addEventListener("click", () => {
+      allNodeRefs.forEach(r => { r.checkbox.checked = false; });
+    });
+
+    let lastDraftText = "";
+    genBtn.addEventListener("click", () => {
+      const chosen = allNodeRefs.filter(r => r.checkbox.checked);
+      if (!chosen.length) {
+        emailStatus.textContent = "Nothing selected. Check the boxes for the projects you want to draft for first.";
+        outputArea.style.display = "none";
+        downloadTxtBtn.style.display = "none";
+        return;
+      }
+      const privateChosen = chosen.filter(r => !r.node.isPublic);
+      const skippedPublic = chosen.length - privateChosen.length;
+      const tmpl = templateArea.value || DEFAULT_EMAIL_TEMPLATE;
+
+      if (!privateChosen.length) {
+        emailStatus.textContent = `All ${chosen.length} selected project(s) are already public - nothing to draft.`;
+        outputArea.style.display = "none";
+        downloadTxtBtn.style.display = "none";
+        return;
+      }
+
+      const drafts = privateChosen.map(r => {
+        const sep = "=".repeat(60);
+        return `${sep}\n${r.node.title} (${r.node.id})\n${sep}\n\n${fillTemplate(tmpl, r.node)}`;
+      });
+      lastDraftText = drafts.join("\n\n\n");
+      outputArea.value = lastDraftText;
+      outputArea.style.display = "";
+      downloadTxtBtn.style.display = "";
+      emailStatus.textContent = `Drafted ${privateChosen.length} email(s).` +
+        (skippedPublic ? ` Skipped ${skippedPublic} already-public selection(s).` : "");
+    });
+
+    downloadTxtBtn.addEventListener("click", () => {
+      downloadBlob(`OSF-Backup/${sanitizePart(root.label)}/email-drafts.txt`, lastDraftText, "text/plain;charset=utf-8");
+    });
+
+    return card;
   }
 
   function renderNode(node, accountLabel) {
@@ -694,6 +955,7 @@
       <div class="title-line">
         <a href="https://osf.io/${encodeURIComponent(node.id)}/" target="_blank" rel="noopener">${escapeHtml(node.title)}</a>
         <span class="badge">${escapeHtml(node.category)}</span>
+        <span class="badge ${node.isPublic ? "status-public" : "status-private"}">${node.isPublic ? "Public" : "Private"}</span>
         ${node.orphanParentId ? `<span class="badge orphan">component of ${escapeHtml(node.orphanParentId)} (parent not accessible)</span>` : ""}
       </div>
       <div class="sub">${contrib ? escapeHtml(contrib) : ""}${yearText ? (contrib ? " &middot; " : "") + yearText : ""}</div>
