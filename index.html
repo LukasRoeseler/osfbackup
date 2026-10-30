@@ -95,6 +95,7 @@
   .badge.orphan{color:var(--warn); border-color:var(--warn); text-transform:none; letter-spacing:0;}
   .badge.status-public{color:var(--good); border-color:var(--good);}
   .badge.status-private{color:var(--warn); border-color:var(--warn);}
+  .badge.license-missing{color:var(--bad); border-color:var(--bad);}
   textarea{
     width:100%; min-height:120px; background:var(--panel2); border:1px solid var(--border); color:var(--text);
     border-radius:8px; padding:10px 12px; font-size:0.88rem; font-family:var(--mono); resize:vertical;
@@ -135,12 +136,14 @@
   .ptable tr.hidden-row{display:none;}
   .ptable tbody tr:hover{background:var(--panel2);}
   .ptable .col-check{width:28px;}
-  .ptable .col-status, .ptable .col-date, .ptable .col-comp, .ptable .col-dl{white-space:nowrap;}
+  .ptable .col-status, .ptable .col-date, .ptable .col-comp, .ptable .col-dl, .ptable .col-license{white-space:nowrap;}
   .ptable .col-comp{text-align:center;}
   .ptable .ttl{display:flex; align-items:baseline; gap:6px; flex-wrap:wrap;}
   .ptable .ttl a{color:var(--text); font-weight:600; text-decoration:none;}
   .ptable .ttl a:hover{color:var(--accent);}
   .ptable .nid{font-family:var(--mono); font-size:0.75rem; color:var(--muted);}
+  .ptable .license-name{color:var(--accent); text-decoration:none;}
+  .ptable .license-name:hover{text-decoration:underline;}
   .twisty{background:none; border:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:0.8rem;
     width:18px; display:inline-flex; justify-content:center;}
   .twisty:hover{color:var(--accent); background:none;}
@@ -463,6 +466,37 @@
     } catch (e) { return []; }
   }
 
+  // License names live on the license definitions, not on the node, and OSF
+  // rejects embedding `license` alongside `contributors`, so the whole list of
+  // licenses is fetched once and matched against the node's license id.
+  let licenseMap = null; // { <id>: { name, url } }
+  async function loadLicenseMap() {
+    if (licenseMap) return licenseMap;
+    const map = {};
+    const raw = await apiRequestAllPages(`${API}/licenses/?page[size]=100`, "licenses");
+    for (const l of raw) {
+      const a = (l && l.attributes) || {};
+      if (l && l.id && a.name) map[l.id] = { name: a.name, url: a.url || null };
+    }
+    licenseMap = map;
+    return map;
+  }
+
+  function licenseIdOf(d) {
+    try {
+      const l = d.relationships && d.relationships.license;
+      if (l && l.data && l.data.id) return l.data.id;
+    } catch (e) { /* fall through */ }
+    return null;
+  }
+
+  function licenseFromMap(d) {
+    const id = licenseIdOf(d);
+    if (!id) return { name: null, url: null };
+    const m = licenseMap && licenseMap[id];
+    return m ? { name: m.name, url: m.url } : { name: null, url: null };
+  }
+
   // Guarded: withdrawn registrations and some deleted nodes come back with a
   // trimmed serialization, and an unguarded deref used to abort the whole crawl
   // and discard every project mapped so far.
@@ -479,6 +513,7 @@
       isPublic: !!attrs.public,
       contributors: contributorsFromEmbed(d),
       admins: adminsFromEmbed(d),
+      license: licenseFromMap(d),
       hasPreprint: !!attrs.preprint,
       preprintsLink: relHref(d, "preprints"),
       preprintResolved: false,
@@ -571,6 +606,9 @@
         // owner from admin lists, which only matters once results exist.
       }
     }
+    // One small request for the whole run: map license ids to names so each
+    // project's license can be shown (or reported as missing).
+    await loadLicenseMap();
     setBusy(`Looking up <code>${accountId}</code>&hellip;`);
 
     let userJson = null;
@@ -726,6 +764,7 @@
       out[n.id] = {
         name: n.title,
         osf_url: `https://osf.io/${n.id}/`,
+        license: (n.license && n.license.name) || null,
         // OSF names its exports itself, so record the name each zip will arrive
         // under: that is what makes the flat pile of downloads mappable back to
         // titles. Only meaningful when the node has OSF Storage files.
@@ -760,6 +799,7 @@
         id: p.id,
         title: p.title,
         status: p.isPublic ? "Public" : "Private",
+        license: (p.license && p.license.name) || "Missing",
         lastActivity: formatDate(p.dateModified || p.dateCreated) || "",
         admins: (p.admins || []).map(a => a.name).join("; "),
         link: `https://osf.io/${p.id}/`,
@@ -770,9 +810,9 @@
     });
   }
 
-  const TABLE_HEADERS = ["OSF ID", "Project Name", "Status", "Last Activity", "Admin(s)", "Link", "Preprint Link", "Component Count", "Components With Different Status"];
+  const TABLE_HEADERS = ["OSF ID", "Project Name", "Status", "License", "Last Activity", "Admin(s)", "Link", "Preprint Link", "Component Count", "Components With Different Status"];
   function rowToArray(r) {
-    return [r.id, r.title, r.status, r.lastActivity, r.admins, r.link, r.preprintLink, r.componentCount, r.mismatches];
+    return [r.id, r.title, r.status, r.license, r.lastActivity, r.admins, r.link, r.preprintLink, r.componentCount, r.mismatches];
   }
 
   function toCsv(rows) {
@@ -792,7 +832,7 @@
     }
     const aoa = [TABLE_HEADERS, ...rows.map(rowToArray)];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 10 }, { wch: 46 }, { wch: 10 }, { wch: 12 }, { wch: 30 }, { wch: 32 }, { wch: 32 }, { wch: 8 }, { wch: 50 }];
+    ws["!cols"] = [{ wch: 10 }, { wch: 46 }, { wch: 10 }, { wch: 42 }, { wch: 12 }, { wch: 30 }, { wch: 32 }, { wch: 32 }, { wch: 8 }, { wch: 50 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Projects");
 
@@ -1171,7 +1211,7 @@ Best regards,
 
     const tableHint = document.createElement("div");
     tableHint.className = "hint";
-    tableHint.textContent = "A flat table of every top-level project: id, name, status, last activity date, admin(s), link, preprint link (if any), and a note on any component whose visibility differs from its project. Private projects only show up here if the token above belongs to an account that can see them.";
+    tableHint.textContent = "A flat table of every top-level project: id, name, status, license, last activity date, admin(s), link, preprint link (if any), and a note on any component whose visibility differs from its project. Private projects only show up here if the token above belongs to an account that can see them.";
     card.appendChild(tableHint);
 
     const tableRow = document.createElement("div");
@@ -1378,6 +1418,7 @@ Best regards,
       <th class="col-check"></th>
       <th class="sortable" data-sort="title">Project</th>
       <th class="col-status sortable" data-sort="status">Status</th>
+      <th class="col-license">License</th>
       <th class="col-date sortable" data-sort="date">Last activity</th>
       <th class="col-comp">Comp.</th>
       <th class="col-dl">Downloaded</th>
@@ -1522,6 +1563,10 @@ Best regards,
       sb.textContent = node.isPublic ? "Public" : "Private";
       tdS.appendChild(sb);
 
+      const tdL = document.createElement("td");
+      tdL.className = "col-license";
+      tdL.appendChild(licenseCell(node));
+
       const tdD = document.createElement("td");
       tdD.className = "col-date muted-cell";
       tdD.textContent = formatDate(node.dateModified || node.dateCreated) || "—";
@@ -1545,7 +1590,7 @@ Best regards,
       filesBtn.addEventListener("click", () => toggleDetail(ref, filesBtn, body));
       tdA.appendChild(filesBtn);
 
-      tr.append(tdC, tdT, tdS, tdD, tdN, tdDl, tdA);
+      tr.append(tdC, tdT, tdS, tdL, tdD, tdN, tdDl, tdA);
       body.appendChild(tr);
       allNodeRefs.push(ref);
       return ref;
@@ -1565,7 +1610,7 @@ Best regards,
         const dr = document.createElement("tr");
         dr.className = "detail-row";
         const td = document.createElement("td");
-        td.colSpan = 7;
+        td.colSpan = 8;
         dr.appendChild(td);
         ref.tr.after(dr);
         ref.detailRow = dr;
@@ -1641,6 +1686,32 @@ Best regards,
 
     rebuild();
     return wrap;
+  }
+
+  function licenseCell(node) {
+    const name = node.license && node.license.name;
+    if (!name) {
+      const b = document.createElement("span");
+      b.className = "badge license-missing";
+      b.textContent = "Missing";
+      b.title = "No license set on this project on OSF.";
+      return b;
+    }
+    if (node.license.url) {
+      const a = document.createElement("a");
+      a.className = "license-name";
+      a.href = node.license.url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = name;
+      a.title = name;
+      return a;
+    }
+    const s = document.createElement("span");
+    s.className = "license-name";
+    s.textContent = name;
+    s.title = name;
+    return s;
   }
 
   function makePreprintButton(node) {
@@ -1837,6 +1908,8 @@ Best regards,
         description: node.description,
         contributors: node.contributors,
         date_created: node.dateCreated,
+        license: (node.license && node.license.name) || null,
+        license_url: (node.license && node.license.url) || null,
         storage_providers: (node.providers || []).map(p => p.name),
         osfstorage_zip_filename: `${node.id}-osfstorage-archive.zip`,
         wikis: (node.wikis || []).map(w => w.name),
